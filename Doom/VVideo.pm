@@ -28,7 +28,7 @@ sub fill {
 }
 
 sub draw_patch {
-    my ($fb, $x, $y, $patch) = @_;
+    my ($fb, $x, $y, $patch, $flip) = @_;
     return if !defined $patch || length($patch) < 8;
     my ($w, $left, $top) = unpack('s<x2s<s<', $patch);
     $x -= $left;
@@ -36,7 +36,8 @@ sub draw_patch {
     my $desttop = $y * SCREENWIDTH + $x;
     my $limit = SCREENWIDTH * SCREENHEIGHT;
     for my $col (0 .. $w - 1) {
-        my $column = unpack('V', substr($patch, 8 + $col * 4, 4));
+        my $src_col = $flip ? $w - 1 - $col : $col;
+        my $column = unpack('V', substr($patch, 8 + $src_col * 4, 4));
         while ($column + 1 < length($patch)) {
             my $topdelta = ord(substr($patch, $column, 1));
             last if $topdelta == 0xFF;

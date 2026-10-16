@@ -19,6 +19,7 @@ use warnings;
 use Win32::API;
 use Doom::Defs qw(SCREENWIDTH SCREENHEIGHT);
 
+use constant SDL_INIT_AUDIO           => 0x00000010;
 use constant SDL_INIT_VIDEO           => 0x00000020;
 use constant SDL_INIT_EVENTS          => 0x00004000;
 use constant SDL_WINDOWPOS_CENTERED   => 0x2FFF0000;
@@ -49,6 +50,8 @@ sub new {
         pixels   => "\0" x (SCREENWIDTH * SCREENHEIGHT * 4),
         vsync    => 1,
         down     => {},
+        audio    => 0,
+        channels => [map { {} } 1 .. 8],
     }, $class;
 }
 
@@ -101,6 +104,110 @@ sub init {
     $self->{delay} = _fn('SDL_Delay', 'I', '');
     my $mouse = _fn('SDL_ShowCursor', 'I', 'I');
     $mouse->Call(0);
+    $self->_open_audio;
+    return;
+}
+
+sub _open_audio {
+    my ($self) = @_;
+    my $dev = 0;
+    eval {
+        my $sub = _fn('SDL_InitSubSystem', 'I', 'I');
+        die "audio\n" if $sub->Call(SDL_INIT_AUDIO) != 0;
+        my $want = pack('l S C C S S L Q Q', 11025, 0x8010, 1, 0, 512, 0, 0, 0, 0);
+        my $have = "\0" x length($want);
+        my $open = _fn('SDL_OpenAudioDevice', 'NIPPI', 'I');
+        $dev = $open->Call(0, 0, $want, $have, 0) || 0;
+        die "audio\n" if !$dev;
+        _fn('SDL_PauseAudioDevice', 'II', '')->Call($dev, 0);
+        $self->{queue} = _fn('SDL_QueueAudio', 'IPI', 'I');
+        $self->{queued} = _fn('SDL_GetQueuedAudioSize', 'I', 'I');
+        $self->{clear_q} = eval { _fn('SDL_ClearQueuedAudio', 'I', '') };
+    };
+    if ($@ || !$dev) {
+        $self->{audio} = 0;
+        print "sem som\n";
+        return;
+    }
+    $self->{audio} = $dev;
+    return;
+}
+
+sub silence {
+    my ($self) = @_;
+    $self->{channels} = [map { {} } 1 .. 8];
+    $self->{clear_q}->Call($self->{audio}) if $self->{audio} && $self->{clear_q};
+    return;
+}
+
+sub mix_pcm {
+    my ($self, $pcm, $key) = @_;
+    return if !$self->{audio} || !defined $pcm || length($pcm) < 2;
+    my $channels = $self->{channels};
+    my $name = $key || '';
+    for my $ch (@$channels) {
+        next if !$ch->{pcm} || ($ch->{name} || '') ne $name || $name eq '';
+        next if ($ch->{pos} || 0) >= ($ch->{n} || 0);
+        if (($ch->{pos} || 0) < 2000) {
+            $ch->{pos} = 0;
+            return;
+        }
+    }
+    my $slot = 0;
+    my $most = -1;
+    for my $i (0 .. $#$channels) {
+        my $ch = $channels->[$i];
+        if (!$ch->{pcm} || ($ch->{pos} || 0) >= ($ch->{n} || 0)) {
+            $slot = $i;
+            $most = -1;
+            last;
+        }
+        my $done = $ch->{pos} || 0;
+        if ($done > $most) {
+            $most = $done;
+            $slot = $i;
+        }
+    }
+    $channels->[$slot] = { pcm => $pcm, name => $name, pos => 0, n => int(length($pcm) / 2) };
+    return;
+}
+
+sub _pump_audio {
+    my ($self) = @_;
+    return if !$self->{audio};
+    my $queued = $self->{queued}->Call($self->{audio}) || 0;
+    my $limit = 512 * 2 * 4;
+    return if $queued >= $limit;
+    my $need = int(($limit - $queued) / 2);
+    return if $need < 1;
+    my $channels = $self->{channels} || [];
+    my $have = 0;
+    for my $ch (@$channels) {
+        next if !$ch->{pcm};
+        my $left = ($ch->{n} || 0) - ($ch->{pos} || 0);
+        $have = $left if $left > $have;
+    }
+    return if $have < 1;
+    $need = $have if $have < $need;
+    my @mix = (0) x $need;
+    for my $ch (@$channels) {
+        next if !$ch->{pcm} || ($ch->{pos} || 0) >= ($ch->{n} || 0);
+        my $left = $ch->{n} - $ch->{pos};
+        my $take = $left < $need ? $left : $need;
+        my $pcm = $ch->{pcm};
+        my $pos = $ch->{pos};
+        for my $i (0 .. $take - 1) {
+            my $s = unpack('v', substr($pcm, ($pos + $i) * 2, 2));
+            $s -= 65536 if $s >= 32768;
+            my $cur = $mix[$i] + int($s * 8 / 15);
+            $cur = 32767 if $cur > 32767;
+            $cur = -32768 if $cur < -32768;
+            $mix[$i] = $cur;
+        }
+        $ch->{pos} = $pos + $take;
+    }
+    my $pcm = pack('v*', map { $_ & 65535 } @mix);
+    $self->{queue}->Call($self->{audio}, $pcm, length($pcm));
     return;
 }
 
@@ -138,6 +245,7 @@ sub upload {
 
 sub present {
     my ($self) = @_;
+    $self->_pump_audio;
     $self->{update}->Call($self->{texture}, 0, $self->{pixels}, SCREENWIDTH * 4);
     $self->{clear}->Call($self->{renderer});
     $self->{copy}->Call($self->{renderer}, $self->{texture}, 0, 0);
@@ -178,6 +286,10 @@ sub delay {
 sub shutdown {
     my ($self) = @_;
     return if !$self->{window};
+    if ($self->{audio}) {
+        eval { _fn('SDL_CloseAudioDevice', 'I', '')->Call($self->{audio}); };
+        $self->{audio} = 0;
+    }
     _fn('SDL_DestroyTexture', 'N', '')->Call($self->{texture}) if $self->{texture};
     _fn('SDL_DestroyRenderer', 'N', '')->Call($self->{renderer}) if $self->{renderer};
     _fn('SDL_DestroyWindow', 'N', '')->Call($self->{window}) if $self->{window};

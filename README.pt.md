@@ -10,7 +10,7 @@ Por **Wagner Nunes da Silva**
 - [www.vagucs.com.br](https://www.vagucs.com.br)
 - [LinkedIn](https://www.linkedin.com/in/wagner-nunes-da-silva-b0a15360)
 
-O jogo fica em Perl. A `SDL2.dll` abre a janela. Não há fonte C neste porte. Esta etapa abre o IWAD, mostra o título e entra na vista do E1M1. As coisas do mapa aparecem, a parede segura o passo, Espaço abre a porta, a grade mostra o que está atrás, e Ctrl dispara a pistola. O monstro vê, anda e revida. Vida, munição, armadura e chave saem do chão.
+O jogo fica em Perl. A `SDL2.dll` abre a janela. Não há fonte C neste porte. Esta etapa abre o IWAD, mostra o título e entra na vista do E1M1. As coisas do mapa aparecem, a parede segura o passo, Espaço abre a porta, a grade mostra o que está atrás, e Ctrl dispara a pistola. O monstro vê, anda e revida. Vida, munição, armadura, chave e espingarda saem do chão.
 
 English version: [README.md](README.md)
 
@@ -25,7 +25,7 @@ English version: [README.md](README.md)
 - Ponto fixo 16.16: `Doom/Compat.pm`, a mesma conta de `doom/compat.py`. O inteiro do Perl tem 8 bytes
 - IWAD: `Doom/Wad.pm`
 
-Nesta etapa o programa confere o ponto fixo, lê o IWAD e desenha o `TITLEPIC`. Enter entra no mapa (E1M1, ou MAP01 no Doom 2). As setas viram e andam. O corpo para na parede e escorrega ao longo dela. Um degrau acima de 24 unidades, ou um vão menor que a altura do jogador, também barra. Barris, monstros e itens aparecem no quadro em que nascem. O que é sólido impede o passo. Espaço abre a porta à frente: o teto sobe, a porta normal espera e fecha, e a porta que fica aberta não volta. A trancada abre quando a chave do chão entra no bolso. Passar por cima recupera vida, junta bala e veste armadura. A armadura absorve parte do dano. A grade deixa ver o outro lado, e quem está atrás fica atrás das barras. Ctrl dispara a pistola: ela recua, gasta uma bala das 50, e o que está na frente perde vida, se encolhe ou cai. Um barril estoura. O zumbi, o imp e o demônio acordam quando vêem o jogador: andam até ele, o zumbi atira, o imp joga a bola de fogo e o demônio morde de perto. A pistola continua a única arma. Não há som. Esc, ou fechar a janela, sai.
+Nesta etapa o programa confere o ponto fixo, lê o IWAD e desenha o `TITLEPIC`. Enter entra no mapa (E1M1, ou MAP01 no Doom 2). As setas viram e andam. Shift corre. O corpo para na parede e escorrega ao longo dela. Um degrau acima de 24 unidades, ou um vão menor que a altura do jogador, também barra. Barris, monstros e itens aparecem no quadro em que nascem. O que é sólido impede o passo. Espaço abre a porta à frente: o teto sobe, a porta normal espera e fecha, e a porta que fica aberta não volta. A trancada abre quando a chave do chão entra no bolso. Passar por cima recupera vida, junta bala e veste armadura. A armadura absorve parte do dano. A grade deixa ver o outro lado, e quem está atrás fica atrás das barras. Ctrl dispara a arma da mão. A pistola recua e gasta uma bala. O que está na frente perde vida, se encolhe ou cai. Um barril estoura. O zumbi, o imp e o demônio acordam quando vêem o jogador: andam até ele, o zumbi atira, o imp joga a bola de fogo e o demônio morde de perto. A tecla 1 volta para a pistola, a 2 escolhe a espingarda e a 3 escolhe a metralhadora. Ctrl dispara a arma da mão: a espingarda gasta um cartucho e espalha sete balas. A metralhadora gasta uma bala por tiro e segue enquanto Ctrl estiver preso. A tecla 4 escolhe o lança-foguetes, que sai do chão. Cada tiro gasta um foguete e ele explode ao bater. A tecla 5 escolhe o rifle de plasma, que sai do chão no Doom 2. Cada tiro gasta uma célula e lança uma bola que queima ao bater. A tecla 6 escolhe a BFG, também no Doom 2. Cada tiro gasta 40 células, solta a bola grande e a explosão varre quem está na frente. A tecla 7 é a serra, a 8 a super espingarda e a 9 o punho. Na fase, iddqd, idkfa, idfa, idclip, idspispopd, idchoppers, idclev, idmus, iddt e idbehold estão ligados. No chão, a esfera de invulnerabilidade, o berserk, a invisibilidade, o traje, o mapa e o visor de luz entram no bolso. A linha de teleporte leva até o marcador, com névoa e a cara virada para a saída. A que dispara uma vez some; a repetida continua no lugar. A parede da linha 48 desliza o desenho para o lado o tempo todo. Ao correr de uma plataforma alta para outra, o corpo cai aos poucos e ainda alcança o piso do outro lado. Atravessar a linha 2 abre a porta e ela fica aberta, a 3 fecha e a 4 abre e depois fecha. A linha 8 sobe uma escada: o piso marcado sobe, e cada sala ao lado com o mesmo chão sobe mais um degrau. O tiro, a porta, o item e o monstro fazem som. O título e o mapa tocam a música. A barra embaixo mostra vida, munição, armadura, rosto e chaves. O interruptor de saída muda de imagem. O piso desce ao cruzar a linha, e o elevador desce e sobe. O lodo tira vida e as luzes piscam. No fim da fase a contagem abre o mapa seguinte, com a vida, a munição e a armadura. Na segunda fase o interruptor abre a porta e o elevador, e um tiro na parede também abre caminho. A tela derrete entre o fim da fase e o mapa seguinte. No fim do episódio a história aparece no piso, a imagem seguinte entra, e uma tecla volta ao título. No episódio 3 o coelho atravessa a tela e leva os tiros. No Doom 2 o texto entre fases segue o jogo, e o mapa 30 abre o desfile de monstros. Um tiro acorda os monstros da sala, mesmo sem acertar. A primeira porta do segundo mapa do Doom 2 abre ao passar por cima. O interruptor da ante-sala abaixa o piso e a passagem abre. Tab mostra o mapa das paredes já vistas, e + e - aproximam. Enter no título abre a dificuldade: no mais fácil o dano cai pela metade e a pistola começa com o dobro de balas; no pesadelo os monstros atiram mais seguido. No Doom registrado a escolha do episódio vem antes. F2 grava a partida e F3 carrega, em seis vagas. Esc, ou fechar a janela, sai.
 
 É preciso um IWAD legal (shareware `doom1.wad` ou comercial `doom.wad` / `doom2.wad`). Este repositório não traz WAD comercial.
 
@@ -78,7 +78,7 @@ run.bat
 run.bat -fps -novsync
 ```
 
-`-iwad` escolhe o arquivo. Um caminho solto terminado em `.wad` também serve. `-fps` escreve os quadros por segundo no console. `-novsync` apresenta sem esperar o monitor.
+`-iwad` escolhe o arquivo. Um caminho solto terminado em `.wad` também serve. `-fps` mostra os quadros por segundo no canto superior direito. `-novsync` apresenta sem esperar o monitor.
 
 A busca do IWAD começa em `DOOMWADDIR` ou `DOOMWADPATH`, se a variável existir, e segue pela pasta atual, pela pasta deste programa e pelas pastas acima. O shareware `DOOM1.WAD` da pasta pai entra nessa lista.
 
@@ -90,10 +90,12 @@ A busca do IWAD começa em `DOOMWADDIR` ou `DOOMWADPATH`, se a variável existir
 | --- | --- |
 | **Enter** | Entrar no mapa |
 | **Seta esquerda / direita** | Virar |
-| **Seta cima / baixo** | Andar |
+| **Seta cima / baixo** | Andar. Shift corre |
 | **Espaço** | Abrir a porta à frente |
-| **Ctrl** | Disparar a pistola |
-| **Esc** | Sair |
+| **Ctrl** | Disparar a arma da mão |
+| **1** | Pistola |
+| **2** | Espingarda |
+| **Esc** | Volta ao título |
 | Fechar a janela | Sair |
 
 ---
@@ -115,6 +117,15 @@ Doom/Specials.pm     porta manual de doom/specials.py
 Doom/Attack.pm       pistola de doom/player.py
 Doom/Enemy.pm        monstro de doom/enemy.py
 Doom/Pickups.pm      itens do chao de doom/mobj.py
+Doom/Sound.pm        efeitos e musica de doom/sound.py
+Doom/Status.pm       barra de doom/status.py
+Doom/Wi.pm           fim de fase de doom/wi_stuff.py
+Doom/Wipe.pm         derretimento de doom/wipe.py
+Doom/Finale.pm       historia de doom/finale.py
+Doom/Automap.pm      mapa do Tab de doom/am_map.py
+Doom/Menu.pm         dificuldade de doom/menu.py
+Doom/Save.pm         gravar e carregar de doom/saveg.py
+Doom/Mus.pm          MUS para MIDI de doom/mus2mid.py
 Doom/VVideo.pm       doom/v_video.py
 Doom/Video.pm        janela SDL2
 Doom/Defs.pm         tela e FRACUNIT

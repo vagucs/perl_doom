@@ -23,6 +23,7 @@ use Doom::Defs qw(FRACUNIT MF_DROPOFF MF_FLOAT MF_MISSILE MF_SHOOTABLE MF_SOLID 
 use Doom::Info qw(sprite_name MI_SPAWNHEALTH MI_SPAWNSTATE);
 
 use constant MISSILERANGE => 32 * 64 * FRACUNIT;
+use constant MELEERANGE => 64 * FRACUNIT;
 use constant MF_NOBLOOD => 0x80000;
 use constant MF_CORPSE => 0x100000;
 use constant MT_SPIDER => 19;
@@ -41,6 +42,69 @@ my @PISTOL = (
     [1, 6, 1, 'PISF', 7, 1],
     [2, 4, 0, '', 0, 0],
     [1, 5, 0, '', 0, 0],
+);
+my @SHOTGUN = (
+    [0, 3, 0, '', 0, 0],
+    [0, 7, 1, 'SHTF', 7, 1],
+    [1, 5, 0, '', 0, 0],
+    [2, 5, 0, '', 0, 0],
+    [3, 4, 0, '', 0, 0],
+    [2, 5, 0, '', 0, 0],
+    [1, 5, 0, '', 0, 0],
+    [0, 3, 0, '', 0, 0],
+    [0, 7, 0, '', 0, 0],
+);
+my @CHAINGUN = (
+    [0, 4, 1, 'CHGF', 5, 1, 0],
+    [1, 4, 1, 'CHGF', 5, 2, 1],
+);
+my @ROCKET = (
+    [1, 8, 0, 'MISF', 15, 1, 0],
+    [1, 12, 1, '', 0, 2, 0],
+);
+my @PLASMA = (
+    [0, 3, 1, 'PLSF', 4, 1, 0],
+    [1, 20, 0, '', 0, 0, 0, 1],
+);
+my @BFG = (
+    [0, 20, 0, '', 0, 0],
+    [1, 10, 0, 'BFGF', 17, 1, 0],
+    [1, 10, 1, '', 0, 2, 0],
+    [1, 20, 0, '', 0, 0],
+);
+my @FIST = (
+    [1, 4, 0, '', 0, 0],
+    [2, 4, 1, '', 0, 0],
+    [3, 5, 0, '', 0, 0],
+    [2, 4, 0, '', 0, 0],
+    [1, 5, 0, '', 0, 0],
+);
+my @SAW = (
+    [0, 4, 1, '', 0, 0],
+    [1, 4, 1, '', 0, 0],
+);
+my @SSG = (
+    [0, 3, 0, '', 0, 0],
+    [0, 7, 1, 'SHT2', 9, 1, 8],
+    [1, 7, 0, '', 0, 0],
+    [2, 7, 0, '', 0, 0],
+    [3, 7, 0, '', 0, 0],
+    [4, 7, 0, '', 0, 0],
+    [5, 7, 0, '', 0, 0],
+    [6, 6, 0, '', 0, 0],
+    [7, 6, 0, '', 0, 0],
+    [0, 5, 0, '', 0, 0],
+);
+my %GUN = (
+    pistol   => { sprite => 'PISG', seq => \@PISTOL },
+    shotgun  => { sprite => 'SHTG', seq => \@SHOTGUN },
+    chaingun => { sprite => 'CHGG', seq => \@CHAINGUN },
+    rocket   => { sprite => 'MISG', seq => \@ROCKET },
+    plasma   => { sprite => 'PLSG', seq => \@PLASMA },
+    bfg      => { sprite => 'BFGG', seq => \@BFG },
+    fist     => { sprite => 'PUNG', seq => \@FIST },
+    chainsaw => { sprite => 'SAWG', seq => \@SAW },
+    ssg      => { sprite => 'SHT2', seq => \@SSG },
 );
 
 my @RND = (
@@ -86,7 +150,11 @@ sub weapon_think {
         }
     }
     return if ($mo->{health} || 0) <= 0;
-    my $ammo_ok = ($mo->{ammo} || 0) >= 1;
+    if ($mo->{saw_up}) {
+        $mo->{saw_up} = 0;
+        Doom::Sound::at($world, 'sawup');
+    }
+    my $ammo_ok = _ammo_count($mo) >= _ammo_need($mo);
     if (($mo->{gunstate} || '') eq 'atk') {
         $mo->{attackdown} = 1 if $firing;
         $mo->{guntics}-- if ($mo->{guntics} || 0) > 0;
@@ -95,49 +163,174 @@ sub weapon_think {
         _enter_atk($world, $mo, $firing, $ammo_ok, $sky);
         return;
     }
+    _apply_want($mo);
     if ($firing && $ammo_ok) {
-        $mo->{gunstate} = 'atk';
-        $mo->{gunstep} = 0;
-        $mo->{attackdown} = 1;
-        _enter_atk($world, $mo, $firing, $ammo_ok, $sky);
-        return;
+        my $gun = _gun_name($mo);
+        my $fresh = !$mo->{attackdown} || ($gun ne 'rocket' && $gun ne 'bfg');
+        if ($fresh) {
+            $mo->{gunstate} = 'atk';
+            $mo->{gunstep} = 0;
+            $mo->{attackdown} = 1;
+            $mo->{empty_said} = 0;
+            _enter_atk($world, $mo, $firing, $ammo_ok, $sky);
+            return;
+        }
     }
-    $mo->{gunsprite} = 'PISG';
-    $mo->{gunframe} = 0;
-    $mo->{gunstate} = 'ready';
+    if ($firing && !$ammo_ok && !$mo->{empty_said}) {
+        my $gun = _gun_name($mo);
+        print(($gun eq 'shotgun' || $gun eq 'ssg') ? "sem cartuchos\n"
+            : $gun eq 'rocket' ? "sem foguetes\n"
+            : ($gun eq 'plasma' || $gun eq 'bfg') ? "sem celulas\n"
+            : "sem balas\n");
+        $mo->{empty_said} = 1;
+    }
+    if (($mo->{gunstate} || '') ne 'ready') {
+        _ready_pose($mo);
+        $mo->{gunstate} = 'ready';
+        $mo->{guntics} = 0;
+        $mo->{gunstep} = 0;
+    }
+    _tick_ready($world, $mo);
     if (!$firing) {
         $mo->{attackdown} = 0;
         $mo->{refire} = 0;
+        $mo->{empty_said} = 0;
     }
+    return;
+}
+
+sub switch_weapon {
+    my ($mo, $name) = @_;
+    return 0 if !$mo || !$GUN{$name};
+    return 0 if $name eq 'shotgun' && !$mo->{owns_shotgun};
+    return 0 if $name eq 'chaingun' && !$mo->{owns_chaingun};
+    return 0 if $name eq 'rocket' && !$mo->{owns_rocket};
+    return 0 if $name eq 'plasma' && !$mo->{owns_plasma};
+    return 0 if $name eq 'bfg' && !$mo->{owns_bfg};
+    return 0 if $name eq 'chainsaw' && !$mo->{owns_chainsaw};
+    return 0 if $name eq 'ssg' && !$mo->{owns_ssg};
+    if (($mo->{gunstate} || '') eq 'atk') {
+        $mo->{wantgun} = $name;
+        return 1;
+    }
+    return 1 if ($mo->{weapon} || 'pistol') eq $name;
+    $mo->{weapon} = $name;
+    $mo->{refire} = 0;
+    $mo->{gunstep} = 0;
+    $mo->{saw_up} = 1 if $name eq 'chainsaw';
+    _ready_pose($mo);
+    $mo->{gunstate} = 'ready';
+    print $name eq 'shotgun' ? "espingarda\n"
+        : $name eq 'chaingun' ? "metralhadora\n"
+        : $name eq 'rocket' ? "lanca-foguetes\n"
+        : $name eq 'plasma' ? "rifle de plasma\n"
+        : $name eq 'bfg' ? "bfg\n"
+        : $name eq 'chainsaw' ? "serra\n"
+        : $name eq 'ssg' ? "super espingarda\n"
+        : $name eq 'fist' ? "punho\n"
+        : "pistola\n";
+    return 1;
+}
+
+sub _gun_name {
+    my ($mo) = @_;
+    my $name = $mo->{weapon} || 'pistol';
+    return $GUN{$name} ? $name : 'pistol';
+}
+
+sub _gun_spec {
+    return $GUN{_gun_name($_[0])};
+}
+
+sub _ammo_count {
+    my ($mo) = @_;
+    my $gun = _gun_name($mo);
+    return 1 if $gun eq 'fist' || $gun eq 'chainsaw';
+    return $mo->{shells} || 0 if $gun eq 'shotgun' || $gun eq 'ssg';
+    return $mo->{rockets} || 0 if $gun eq 'rocket';
+    return $mo->{cells} || 0 if $gun eq 'plasma' || $gun eq 'bfg';
+    return $mo->{ammo} || 0;
+}
+
+sub _ammo_need {
+    my $gun = _gun_name($_[0]);
+    return 40 if $gun eq 'bfg';
+    return 2 if $gun eq 'ssg';
+    return 1;
+}
+
+sub _ready_pose {
+    my ($mo) = @_;
+    my $spec = _gun_spec($mo);
+    $mo->{gunsprite} = $spec->{sprite};
+    $mo->{gunframe} = _gun_name($mo) eq 'chainsaw' ? 2 : 0;
+    return;
+}
+
+sub _tick_ready {
+    my ($world, $mo) = @_;
+    return if _gun_name($mo) ne 'chainsaw';
+    if (($mo->{guntics} || 0) > 0) {
+        $mo->{guntics}--;
+        return if $mo->{guntics} > 0;
+    }
+    $mo->{gunstep} = ($mo->{gunstep} || 0) ? 0 : 1;
+    $mo->{gunframe} = $mo->{gunstep} ? 3 : 2;
+    $mo->{guntics} = 4;
+    Doom::Sound::at($world, 'sawidl') if !$mo->{gunstep};
+    return;
+}
+
+sub _apply_want {
+    my ($mo) = @_;
+    my $want = $mo->{wantgun} || '';
+    return if !$want;
+    delete $mo->{wantgun};
+    $mo->{gunstate} = 'ready';
+    switch_weapon($mo, $want);
     return;
 }
 
 sub _enter_atk {
     my ($world, $mo, $firing, $ammo_ok, $sky) = @_;
+    my $spec = _gun_spec($mo);
+    my $seq = $spec->{seq};
     while (1) {
-        if (($mo->{gunstep} || 0) >= @PISTOL) {
+        if (($mo->{gunstep} || 0) >= @$seq) {
+            if ($mo->{wantgun}) {
+                _ready_pose($mo);
+                $mo->{guntics} = 0;
+                $mo->{gunstate} = 'ready';
+                _apply_want($mo);
+                return;
+            }
             if ($firing && $ammo_ok) {
                 $mo->{gunstep} = 0;
                 next;
             }
-            $mo->{gunsprite} = 'PISG';
-            $mo->{gunframe} = 0;
+            _ready_pose($mo);
             $mo->{guntics} = 0;
             $mo->{gunstate} = 'ready';
             if (!$firing) {
                 $mo->{attackdown} = 0;
                 $mo->{refire} = 0;
             }
+            _apply_want($mo);
             return;
         }
-        my ($frame, $tics, $fire, $flash, $flash_tics, $light) = @{$PISTOL[$mo->{gunstep}]};
-        $mo->{gunsprite} = 'PISG';
+        my $step = $seq->[$mo->{gunstep}];
+        if (($step->[7] || 0) && $firing && $ammo_ok && !$mo->{wantgun}) {
+            $mo->{gunstep} = 0;
+            next;
+        }
+        my ($frame, $tics, $fire, $flash, $flash_tics, $light, $flashframe) = @$step;
+        $mo->{gunsprite} = $spec->{sprite};
         $mo->{gunframe} = $frame;
         $mo->{guntics} = $tics;
         $mo->{gunstate} = 'atk';
         if ($flash_tics) {
             $mo->{gunflash} = $flash;
-            $mo->{gunflashframe} = 0;
+            $mo->{gunflashframe} = $flashframe || 0;
             $mo->{flash_tics} = $flash_tics;
         }
         $mo->{extralight} = $light if $light;
@@ -161,10 +354,123 @@ sub _bullet_slope {
 
 sub _do_shot {
     my ($world, $mo, $sky) = @_;
-    return if ($mo->{ammo} || 0) < 1;
-    $mo->{ammo}--;
-    print "sem balas\n" if $mo->{ammo} <= 0;
-    my $accurate = !$mo->{refire};
+    my $gun = _gun_name($mo);
+    if ($gun eq 'shotgun') {
+        return if ($mo->{shells} || 0) < 1;
+        $mo->{shells}--;
+        print "sem cartuchos\n" if $mo->{shells} <= 0;
+        Doom::Sound::at($world, 'shotgn');
+        for (1 .. 7) {
+            _pellet($world, $mo, $sky, 0);
+        }
+    }
+    elsif ($gun eq 'rocket') {
+        return if ($mo->{rockets} || 0) < 1;
+        $mo->{rockets}--;
+        print "sem foguetes\n" if $mo->{rockets} <= 0;
+        Doom::Sound::at($world, 'rlaunc');
+        Doom::Enemy::spawn_player_missile($world, $mo, 33);
+    }
+    elsif ($gun eq 'plasma') {
+        return if ($mo->{cells} || 0) < 1;
+        $mo->{cells}--;
+        print "sem celulas\n" if $mo->{cells} <= 0;
+        $mo->{gunflash} = 'PLSF';
+        $mo->{gunflashframe} = p_random() & 1;
+        $mo->{flash_tics} = 4;
+        Doom::Sound::at($world, 'plasma');
+        Doom::Enemy::spawn_player_missile($world, $mo, 34);
+    }
+    elsif ($gun eq 'bfg') {
+        return if ($mo->{cells} || 0) < 40;
+        $mo->{cells} -= 40;
+        print "sem celulas\n" if $mo->{cells} < 40;
+        Doom::Sound::at($world, 'bfg');
+        Doom::Enemy::spawn_player_missile($world, $mo, 35);
+    }
+    elsif ($gun eq 'fist' || $gun eq 'chainsaw') {
+        my $damage = 2 * ((p_random() % 10) + 1);
+        $damage *= 10 if $gun eq 'fist' && ($mo->{pow_berserk} || 0) > 0;
+        my $range = $gun eq 'chainsaw' ? MELEERANGE + 1 : MELEERANGE;
+        my $hit = _melee($world, $mo, $range, $damage);
+        if ($gun eq 'chainsaw') {
+            Doom::Sound::at($world, $hit ? 'sawhit' : 'sawful');
+        }
+        elsif ($hit) {
+            Doom::Sound::at($world, 'punch');
+        }
+    }
+    elsif ($gun eq 'ssg') {
+        return if ($mo->{shells} || 0) < 2;
+        $mo->{shells} -= 2;
+        print "sem cartuchos\n" if $mo->{shells} <= 0;
+        $mo->{gunflash} = 'SHT2';
+        $mo->{gunflashframe} = 8;
+        $mo->{flash_tics} = 9;
+        Doom::Sound::at($world, 'dshtgn');
+        my $slope = _bullet_slope($world, $mo);
+        _ssg_pellet($world, $mo, $sky, $slope) for 1 .. 20;
+    }
+    else {
+        return if ($mo->{ammo} || 0) < 1;
+        $mo->{ammo}--;
+        print "sem balas\n" if $mo->{ammo} <= 0;
+        Doom::Sound::at($world, 'pistol');
+        _pellet($world, $mo, $sky, !$mo->{refire});
+    }
+    $mo->{refire}++;
+    Doom::Enemy::noise_alert($world, $mo);
+    return;
+}
+
+sub _melee {
+    my ($world, $mo, $range, $damage) = @_;
+    my $angle = as_u32(($mo->{angle} || 0) + (p_random() - p_random()) * 262144);
+    my $hit = 0;
+    line_attack($world, $mo, $angle, $range, -1, 0,
+        sub {
+            my (undef, $x, $y, $z) = @_;
+            _spawn_puff($world, $x, $y, $z);
+        },
+        sub {
+            my ($th, $x, $y, $z) = @_;
+            $hit = 1;
+            if (($th->{flags} || 0) & MF_NOBLOOD) {
+                _spawn_puff($world, $x, $y, $z);
+            }
+            else {
+                _spawn_blood($world, $x, $y, $z, $damage);
+            }
+            damage_mobj($world, $th, $mo, $damage);
+        });
+    return $hit;
+}
+
+sub _ssg_pellet {
+    my ($world, $mo, $sky, $slope) = @_;
+    my $damage = 5 * ((p_random() % 3) + 1);
+    my $angle = as_u32(($mo->{angle} || 0) + (p_random() - p_random()) * 524288);
+    my $pellet = ($slope || 0) + (p_random() - p_random()) * 32;
+    line_attack($world, $mo, $angle, MISSILERANGE, $sky, $pellet,
+        sub {
+            my (undef, $x, $y, $z) = @_;
+            _spawn_puff($world, $x, $y, $z);
+        },
+        sub {
+            my ($th, $x, $y, $z) = @_;
+            if (($th->{flags} || 0) & MF_NOBLOOD) {
+                _spawn_puff($world, $x, $y, $z);
+            }
+            else {
+                _spawn_blood($world, $x, $y, $z, $damage);
+            }
+            damage_mobj($world, $th, $mo, $damage);
+        });
+    return;
+}
+
+sub _pellet {
+    my ($world, $mo, $sky, $accurate) = @_;
     my $damage = 5 * ((p_random() % 3) + 1);
     my $angle = $mo->{angle};
     $angle = as_u32($angle + (p_random() - p_random()) * 262144) if !$accurate;
@@ -184,7 +490,6 @@ sub _do_shot {
             }
             damage_mobj($world, $th, $mo, $damage);
         });
-    $mo->{refire}++;
     return;
 }
 
@@ -211,6 +516,12 @@ sub damage_mobj {
     my ($world, $target, $source, $damage) = @_;
     return if !$target || !$target->{alive} || !(($target->{flags} || 0) & MF_SHOOTABLE);
     return if $damage <= 0;
+    if ($target->{player} && $damage < 1000
+        && ((($target->{cheats} || 0) & 1) || ($target->{pow_invul} || 0) > 0))
+    {
+        return;
+    }
+    $damage = int($damage / 2) if $target->{player} && ($world->{skill} || 0) == 0;
     if ($target->{player}) {
         my $hurt = $damage;
         if ($target->{armortype}) {
@@ -225,18 +536,26 @@ sub damage_mobj {
         }
         $target->{health} -= $hurt;
         $target->{health} = 0 if $target->{health} < 0;
+        $target->{damagecount} = ($target->{damagecount} || 0) + $hurt;
+        $target->{damagecount} = 100 if $target->{damagecount} > 100;
+        $target->{attacker} = $source if $source;
+        Doom::Sound::at($world, 'plpain') if $target->{health} > 0;
         print "vida $target->{health}\n";
         return;
     }
     $target->{target} = $source if $source && $source != $target;
     $target->{health} -= $damage;
     if ($target->{health} <= 0) {
+        if ($source && $source->{player} && (($target->{flags} || 0) & 0x400000)) {
+            $source->{kills} = ($source->{kills} || 0) + 1;
+        }
         _kill($world, $target);
         return;
     }
     my $info = $Doom::Info::MOBJINFO[$target->{type}];
     return if !$info;
     if (p_random() < ($info->[MI_PAINCHANCE] || 0) && $info->[MI_PAINSTATE]) {
+        Doom::Sound::at($world, $info->[9]) if $info->[9];
         set_mobj_state($world, $target, $info->[MI_PAINSTATE]);
     }
     return;
@@ -248,6 +567,7 @@ sub _kill {
     $mo->{flags} |= MF_CORPSE | MF_DROPOFF;
     $mo->{height} = int(($mo->{height} || 0) / 4);
     my $info = $Doom::Info::MOBJINFO[$mo->{type} || 0];
+    Doom::Sound::at($world, $info->[14]) if $info && $info->[14];
     return if !$info;
     my $xds = $info->[MI_XDEATHSTATE] || 0;
     my $st = ($mo->{health} < -($info->[MI_SPAWNHEALTH] || 0) && $xds)

@@ -17,7 +17,7 @@ use warnings;
 
 use Exporter qw(import);
 our @EXPORT_OK = qw(
-    thrust xy_move set_thing_position try_move
+    thrust xy_move z_move set_thing_position try_move
     use_lines change_sector line_attack aim_slope approx_distance
 );
 
@@ -35,6 +35,8 @@ use Doom::Pickups;
 use Doom::Tables qw(fine_cos fine_sin slope_div);
 
 use constant USERANGE => 64 * FRACUNIT;
+use constant GRAVITY => FRACUNIT;
+use constant MF_NOGRAVITY => 0x200;
 use constant PT_ADDTHINGS => 2;
 
 use constant INT_MAX => 0x7FFFFFFF;
@@ -80,6 +82,12 @@ sub xy_move {
             $ymove = 0;
         }
         if (try_move($world, $mo, $ptryx, $ptryy)) {
+            if ($mo->{_stopmove}) {
+                $mo->{_stopmove} = 0;
+                $mo->{momx} = 0;
+                $mo->{momy} = 0;
+                last;
+            }
             next;
         }
         slide_move($world, $mo, $mo->{momx}, $mo->{momy}) if $mo->{player};
@@ -91,6 +99,29 @@ sub xy_move {
     else {
         $mo->{momx} = fixed_mul($mo->{momx}, FRICTION);
         $mo->{momy} = fixed_mul($mo->{momy}, FRICTION);
+    }
+    return;
+}
+
+sub z_move {
+    my ($world, $mo) = @_;
+    return if !$mo;
+    $mo->{momz} = 0 if !defined $mo->{momz};
+    $mo->{z} = ($mo->{z} || 0) + $mo->{momz};
+    if ($mo->{z} <= ($mo->{floorz} || 0)) {
+        if ($mo->{momz} < 0) {
+            Doom::Sound::at($world, 'oof') if $mo->{player} && $mo->{momz} < -(GRAVITY * 8);
+            $mo->{momz} = 0;
+        }
+        $mo->{z} = $mo->{floorz};
+    }
+    elsif (!(($mo->{flags} || 0) & MF_NOGRAVITY)) {
+        $mo->{momz} = $mo->{momz} == 0 ? -(GRAVITY * 2) : $mo->{momz} - GRAVITY;
+    }
+    my $top = ($mo->{ceilingz} || 0);
+    if ($mo->{z} + ($mo->{height} || 0) > $top) {
+        $mo->{momz} = 0 if $mo->{momz} > 0;
+        $mo->{z} = $top - ($mo->{height} || 0);
     }
     return;
 }
@@ -359,11 +390,23 @@ sub try_move {
         }
     }
     unset_thing_position($world, $thing);
+    my $oldx = $thing->{x};
+    my $oldy = $thing->{y};
     $thing->{floorz} = $chk->{floorz};
     $thing->{ceilingz} = $chk->{ceilingz};
     $thing->{x} = $x;
     $thing->{y} = $y;
     set_thing_position($world, $thing);
+    if ($world->{specials} && !($thing->{flags} & (MF_TELEPORT | MF_NOCLIP))) {
+        my $hits = $chk->{spechit} || [];
+        for (my $i = @$hits - 1; $i >= 0; $i--) {
+            my $ln = $hits->[$i];
+            next if !$ln->{special};
+            my $side = point_on_line_side($thing->{x}, $thing->{y}, $ln);
+            my $oldside = point_on_line_side($oldx, $oldy, $ln);
+            $world->{specials}->cross_special($ln, $oldside, $thing) if $side != $oldside;
+        }
+    }
     return 1;
 }
 
@@ -833,6 +876,7 @@ sub line_attack {
         my $inn = $_[0];
         if ($inn->{isaline}) {
             my $li = $inn->{line};
+            $world->{specials}->shoot_special($li, $source) if $li->{special} && $world->{specials};
             my $stop = 0;
             if (!($li->{flags} & ML_TWOSIDED)) {
                 $stop = 1;

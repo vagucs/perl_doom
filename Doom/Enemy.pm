@@ -9,7 +9,7 @@
 # www.vagucs.com.br
 #
 # O monstro ve, anda e revida. Igual a doom/enemy.py.
-# Ainda nao ha som.
+# O tiro acorda quem esta atras da porta aberta.
 
 package Doom::Enemy;
 
@@ -33,6 +33,7 @@ use constant DI_NODIR => 8;
 use constant MF_AMBUSH => 32;
 use constant MF_JUSTHIT => 64;
 use constant MF_JUSTATTACKED => 128;
+use constant ML_SOUNDBLOCK => 64;
 use constant MT_TROOPSHOT => 31;
 use constant MI_SEESTATE => 3;
 use constant MI_MELEESTATE => 10;
@@ -70,6 +71,29 @@ sub call_action {
     elsif ($act eq 'SargAttack') {
         _melee($world, $mo, 4);
     }
+    elsif ($act eq 'BFGSpray') {
+        _bfg_spray($world, $mo);
+    }
+    return;
+}
+
+sub _bfg_spray {
+    my ($world, $ball) = @_;
+    my $shooter = $ball && $ball->{target};
+    return if !$shooter;
+    my $base = $ball->{angle} || 0;
+    for my $i (0 .. 39) {
+        my $an = as_u32($base - int(ANG90 / 2) + int(ANG90 / 40) * $i);
+        my (undef, $target) = aim_slope($world, $shooter, $an, 16 * 64 * FRACUNIT);
+        next if !$target;
+        my $damage = 0;
+        $damage += (Doom::Attack::p_random() & 7) + 1 for 1 .. 15;
+        Doom::Attack::damage_mobj($world, $target, $shooter, $damage) if $damage > 0;
+        Doom::Attack::_spawn_fx(
+            $world, $target->{x}, $target->{y},
+            ($target->{z} || 0) + int(($target->{height} || 0) / 4), 42,
+        );
+    }
     return;
 }
 
@@ -100,17 +124,77 @@ sub _info {
     return $Doom::Info::MOBJINFO[$mo->{type}];
 }
 
+sub noise_alert {
+    my ($world, $emitter) = @_;
+    return if !$world || !$emitter;
+    my $here = $world->point_in_subsector($emitter->{x}, $emitter->{y});
+    return if !$here || !$here->{sector};
+    $world->{validcount} = ($world->{validcount} || 0) + 1;
+    _recursive_sound($world, $here->{sector}, 0, $emitter);
+    return;
+}
+
+sub _recursive_sound {
+    my ($world, $sec, $blocks, $target) = @_;
+    return if !$sec;
+    my $mark = $blocks + 1;
+    if (($sec->{validcount} || 0) == ($world->{validcount} || 0)
+        && ($sec->{soundtraversed} || 0) <= $mark)
+    {
+        return;
+    }
+    $sec->{validcount} = $world->{validcount};
+    $sec->{soundtraversed} = $mark;
+    $sec->{soundtarget} = $target;
+    for my $ln (@{$sec->{lines} || []}) {
+        next if !(($ln->{flags} || 0) & ML_TWOSIDED);
+        my ($top, $bot) = Doom::Collision::line_opening($ln);
+        next if $top - $bot <= 0;
+        my $other = ($ln->{frontsector} && $ln->{frontsector} == $sec)
+            ? $ln->{backsector} : $ln->{frontsector};
+        next if !$other;
+        if (($ln->{flags} || 0) & ML_SOUNDBLOCK) {
+            _recursive_sound($world, $other, 1, $target) if $blocks == 0;
+        }
+        else {
+            _recursive_sound($world, $other, $blocks, $target);
+        }
+    }
+    return;
+}
+
 sub _look {
     my ($world, $mo) = @_;
     $mo->{threshold} = 0;
-    my $pl = _player($world);
-    return if !$pl || !(($pl->{flags} || 0) & MF_SHOOTABLE);
-    return if !_see_player($world, $mo, $pl, 0);
+    my $see = 0;
+    my $here = $world->point_in_subsector($mo->{x}, $mo->{y});
+    my $targ = $here && $here->{sector} ? $here->{sector}{soundtarget} : undef;
+    if ($targ && ($targ->{health} || 0) > 0 && (($targ->{flags} || 0) & MF_SHOOTABLE)) {
+        $mo->{target} = $targ;
+        if (($mo->{flags} || 0) & MF_AMBUSH) {
+            $see = _sight($world, $mo, $targ) ? 1 : 0;
+        }
+        else {
+            $see = 1;
+        }
+    }
+    if (!$see) {
+        my $pl = _player($world);
+        return if !_see_player($world, $mo, $pl, 0);
+    }
     $mo->{movedir} = DI_NODIR;
     $mo->{movecount} = 0;
     my $info = _info($mo);
-    my $see = $info ? ($info->[MI_SEESTATE] || 0) : 0;
-    Doom::Attack::set_mobj_state($world, $mo, $see) if $see;
+    my $hear = $info ? ($info->[4] || '') : '';
+    if ($hear eq 'posit1' || $hear eq 'posit2' || $hear eq 'posit3') {
+        $hear = (qw(posit1 posit2 posit3))[Doom::Attack::p_random() % 3];
+    }
+    elsif ($hear eq 'bgsit1' || $hear eq 'bgsit2') {
+        $hear = (qw(bgsit1 bgsit2))[Doom::Attack::p_random() % 2];
+    }
+    Doom::Sound::at($world, $hear) if $hear;
+    my $seestate = $info ? ($info->[MI_SEESTATE] || 0) : 0;
+    Doom::Attack::set_mobj_state($world, $mo, $seestate) if $seestate;
     return;
 }
 
@@ -181,19 +265,21 @@ sub _chase {
     }
     if (($mo->{flags} || 0) & MF_JUSTATTACKED) {
         $mo->{flags} &= ~MF_JUSTATTACKED;
-        _new_dir($world, $mo);
+        _new_dir($world, $mo) if ($world->{skill} || 0) < 4;
         return;
     }
     my $dist = approx_distance($target->{x} - $mo->{x}, $target->{y} - $mo->{y});
     my $info = _info($mo) || [];
     my $melee = $info->[MI_MELEESTATE] || 0;
     my $miss = $info->[MI_MISSILESTATE] || 0;
+    my $fast = ($world->{skill} || 0) >= 4;
     if ($melee && $dist < MELEERANGE - 20 * FRACUNIT + ($target->{radius} || 0)
         && _sight($world, $mo, $target)) {
         Doom::Attack::set_mobj_state($world, $mo, $melee);
         return;
     }
-    if ($miss && !$mo->{reactiontime} && (($mo->{movecount} || 0) == 0 || (($mo->{flags} || 0) & MF_JUSTHIT))
+    if ($miss && !$mo->{reactiontime}
+        && ($fast || ($mo->{movecount} || 0) == 0 || (($mo->{flags} || 0) & MF_JUSTHIT))
         && _missile_ok($world, $mo, $target, $dist, $melee)) {
         $mo->{flags} &= ~MF_JUSTHIT;
         $mo->{flags} |= MF_JUSTATTACKED;
@@ -330,6 +416,7 @@ sub _hitscan {
     my ($world, $mo, $pellets, $faces, $mul) = @_;
     my $t = $mo->{target};
     return if !$t;
+    noise_alert($world, $mo);
     _face($mo, $t);
     my ($slope) = aim_slope($world, $mo, $mo->{angle}, MISSILERANGE);
     my $saved = $mo->{angle};
@@ -366,6 +453,9 @@ sub _melee {
     my $dist = approx_distance($t->{x} - $mo->{x}, $t->{y} - $mo->{y});
     return 0 if $dist >= MELEERANGE + ($mo->{radius} || 0);
     Doom::Attack::damage_mobj($world, $t, $mo, ((Doom::Attack::p_random() % 8) + 1) * $mul);
+    my $info = _info($mo);
+    my $snd = ($info && $info->[6]) ? $info->[6] : 'claw';
+    Doom::Sound::at($world, $snd);
     return 1;
 }
 
@@ -409,6 +499,52 @@ sub _spawn_ball {
         movedir => DI_NODIR, movecount => 0, reactiontime => 0,
     };
     push @{$world->{mobjs}}, $mo;
+    Doom::Sound::at($world, $info->[4]) if $info->[4];
+    return $mo;
+}
+
+sub spawn_player_missile {
+    my ($world, $src, $type) = @_;
+    my $info = $Doom::Info::MOBJINFO[$type];
+    return if !$info || !$src;
+    my $stn = $info->[MI_SPAWNSTATE];
+    my $st = $Doom::Info::STATES[$stn];
+    return if !$st;
+    my $base = $src->{angle} || 0;
+    my $left = as_u32($base + (1 << 26));
+    my $right = as_u32($left - (2 << 26));
+    my ($ang, $slope) = ($base, 0);
+    for my $try ($base, $left, $right) {
+        my ($s, $target) = aim_slope($world, $src, $try, MISSILERANGE);
+        if ($target) {
+            ($ang, $slope) = ($try, $s);
+            last;
+        }
+    }
+    my $speed = $info->[MI_SPEED] || 0;
+    my $z = ($src->{z} || 0) + 32 * FRACUNIT;
+    my $mo = {
+        x => $src->{x}, y => $src->{y}, z => $z, angle => $ang,
+        radius => $info->[16], height => $info->[17],
+        flags => $info->[21] || 0, health => $info->[2] || 100, type => $type,
+        doomednum => -1, player => undef, alive => 1, target => $src,
+        istate => $stn, tics => $st->[2],
+        sprite => sprite_name($st->[0]), frame => $st->[1],
+        momx => fixed_mul($speed, fine_cos($ang)),
+        momy => fixed_mul($speed, fine_sin($ang)),
+        momz => fixed_mul($speed, $slope),
+        movedir => DI_NODIR, movecount => 0, reactiontime => 0,
+    };
+    my $sub = $world->point_in_subsector($mo->{x}, $mo->{y});
+    if ($sub && $sub->{sector}) {
+        $mo->{floorz} = $sub->{sector}{floorheight};
+        $mo->{ceilingz} = $sub->{sector}{ceilingheight};
+    }
+    push @{$world->{mobjs}}, $mo;
+    my $nx = $mo->{x} + int(($mo->{momx} || 0) / 2);
+    my $ny = $mo->{y} + int(($mo->{momy} || 0) / 2);
+    $mo->{z} += int(($mo->{momz} || 0) / 2);
+    _boom($world, $mo, $mo->{_hitthing}) if !try_move($world, $mo, $nx, $ny);
     return $mo;
 }
 
@@ -419,6 +555,8 @@ sub _boom {
     $mo->{momx} = 0;
     $mo->{momy} = 0;
     $mo->{momz} = 0;
+    my $fx = _info($mo);
+    Doom::Sound::at($world, $fx->[14]) if $fx && $fx->[14];
     if ($hit && (($hit->{flags} || 0) & MF_SHOOTABLE) && $hit != $mo->{target}) {
         my $info = _info($mo) || [];
         my $dmg = ($info->[MI_DAMAGE] || 0) * ((Doom::Attack::p_random() % 8) + 1);
