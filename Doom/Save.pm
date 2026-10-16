@@ -39,6 +39,7 @@ my @MOBJ_KEYS = qw(
 my @THINKER_KEYS = qw(
     type direction topheight speed topwait topcountdown
     dest status low high wait count pic
+    crush ctype bottomheight perpetual
 );
 
 sub new {

@@ -1,1 +1,3 @@
 *.dsg
+*.lmp
+default.cfg

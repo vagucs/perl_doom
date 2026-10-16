@@ -71,12 +71,59 @@ sub new {
     }
     my $bg = $commercial || $episode == 4 ? 'INTERPIC' : 'WIMAP' . ($episode - 1);
     $self->{background} = _lump($wad, $bg) || _lump($wad, 'INTERPIC');
+    $self->{anims} = [];
+    $self->{bcnt} = 0;
+    if (!$commercial && $episode >= 1 && $episode <= 3) {
+        my @spec = (
+            [
+                [0, 11, 3, 224, 104], [0, 11, 3, 184, 160], [0, 11, 3, 112, 136],
+                [0, 11, 3, 72, 112], [0, 11, 3, 88, 96], [0, 11, 3, 64, 48],
+                [0, 11, 3, 192, 40], [0, 11, 3, 136, 16], [0, 11, 3, 80, 16],
+                [0, 11, 3, 64, 24],
+            ],
+            [
+                [2, 11, 1, 128, 136, 1], [2, 11, 1, 128, 136, 2], [2, 11, 1, 128, 136, 3],
+                [2, 11, 1, 128, 136, 4], [2, 11, 1, 128, 136, 5], [2, 11, 1, 128, 136, 6],
+                [2, 11, 1, 128, 136, 7], [0, 11, 3, 192, 144, 8], [2, 11, 1, 128, 136, 8],
+            ],
+            [
+                [0, 11, 3, 104, 168], [0, 11, 3, 40, 136], [0, 11, 3, 160, 96],
+                [0, 11, 3, 104, 80], [0, 11, 3, 120, 32], [0, 8, 3, 40, 0],
+            ],
+        );
+        my $list = $spec[$episode - 1];
+        for my $j (0 .. $#$list) {
+            my $sp = $list->[$j];
+            my @patches;
+            for my $i (0 .. $sp->[2] - 1) {
+                my $name = sprintf('WIA%d%02d%02d', $episode - 1, $j, $i);
+                push @patches, _lump($wad, $name);
+            }
+            push @{$self->{anims}}, {
+                type => $sp->[0], period => $sp->[1], x => $sp->[3], y => $sp->[4],
+                data => $sp->[5] || 0, patches => \@patches, ctr => -1, nexttic => 1 + int(rand($sp->[1] || 1)),
+            };
+        }
+    }
     return $self;
 }
 
 sub tick {
     my ($self, $go) = @_;
     $self->{bg}++;
+    $self->{bcnt}++;
+    for my $a (@{$self->{anims} || []}) {
+        next if $self->{bcnt} != $a->{nexttic};
+        if ($a->{type} == 0) {
+            $a->{ctr}++;
+            $a->{ctr} = 0 if $a->{ctr} >= @{$a->{patches}};
+            $a->{nexttic} = $self->{bcnt} + $a->{period};
+        }
+        elsif ($self->{next} == $a->{data}) {
+            $a->{ctr}++ if $a->{ctr} < @{$a->{patches}} - 1;
+            $a->{nexttic} = $self->{bcnt} + $a->{period};
+        }
+    }
     if ($self->{bg} == 1) {
         my $song = $self->{commercial} ? 'dm2int' : 'inter';
         $self->{sound}->change_music($song, 1) if $self->{sound};
@@ -104,6 +151,11 @@ sub tick {
 sub draw {
     my ($self, $fb) = @_;
     draw_patch($fb, 0, 0, $self->{background}) if $self->{background};
+    for my $a (@{$self->{anims} || []}) {
+        next if $a->{ctr} < 0;
+        my $patch = $a->{patches}[$a->{ctr}];
+        draw_patch($fb, $a->{x}, $a->{y}, $patch) if $patch;
+    }
     if ($self->{state} == STAT_COUNT) {
         _draw_stats($self, $fb);
     }

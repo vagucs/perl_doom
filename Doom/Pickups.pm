@@ -141,10 +141,20 @@ sub touch {
         print "visor de luz\n" if $taken;
     }
     elsif ($kind == 8) {
-        my $max = $mo->{maxammo} || 200;
-        $mo->{maxammo} = $max * 2 if $max < 400;
+        $mo->{maxammo} = ($mo->{maxammo} || 200) * 2 if ($mo->{maxammo} || 200) < 400;
+        $mo->{maxshells} = ($mo->{maxshells} || 50) * 2 if ($mo->{maxshells} || 50) < 100;
+        $mo->{maxrockets} = ($mo->{maxrockets} || 50) * 2 if ($mo->{maxrockets} || 50) < 100;
+        $mo->{maxcells} = ($mo->{maxcells} || 300) * 2 if ($mo->{maxcells} || 300) < 600;
         _bullets($mo, 10);
+        $mo->{shells} = ($mo->{shells} || 0) + 4;
+        $mo->{shells} = $mo->{maxshells} if $mo->{shells} > ($mo->{maxshells} || 50);
+        $mo->{rockets} = ($mo->{rockets} || 0) + 1;
+        $mo->{rockets} = $mo->{maxrockets} if $mo->{rockets} > ($mo->{maxrockets} || 50);
+        $mo->{cells} = ($mo->{cells} || 0) + 20;
+        $mo->{cells} = $mo->{maxcells} if $mo->{cells} > ($mo->{maxcells} || 300);
         $taken = 1;
+        $mo->{message} = 'pegou a mochila';
+        $mo->{messaget} = 140;
         print "pegou a mochila\n";
     }
     return 0 if !$taken;
@@ -153,6 +163,10 @@ sub touch {
     my $power = $kind == 2022 || $kind == 2023 || $kind == 2024 || $kind == 2025 || $kind == 2026 || $kind == 2045;
     my $gun = $kind == 2001 || $kind == 2002 || $kind == 2003 || $kind == 2004 || $kind == 2005 || $kind == 2006 || $kind == 82;
     Doom::Sound::at($world, $power ? 'getpow' : $gun ? 'wpnup' : 'itemup');
+    if (!$mo->{message}) {
+        $mo->{message} = 'pegou';
+        $mo->{messaget} = 140;
+    }
     Doom::Attack::_remove($world, $item);
     return 1;
 }

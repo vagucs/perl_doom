@@ -52,8 +52,17 @@ sub shar {
 }
 
 sub fixed_mul {
-    my ($a, $b) = @_;
-    return as_i32((as_i32($a) * as_i32($b)) >> 16);
+    # Mesma conta de as_i32((as_i32(a) * as_i32(b)) >> 16).
+    # O corpo evita tres chamadas no piso, que repete esta conta
+    # em cada pixel. O resultado de 32 bits continua o mesmo.
+    my $a = $_[0] & MASK32;
+    $a -= 4294967296 if $a >= 0x80000000;
+    my $b = $_[1] & MASK32;
+    $b -= 4294967296 if $b >= 0x80000000;
+    my $p = ($a * $b) >> 16;
+    $p &= MASK32;
+    return $p - 4294967296 if $p >= 0x80000000;
+    return $p;
 }
 
 sub fixed_div {

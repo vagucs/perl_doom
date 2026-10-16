@@ -18,6 +18,7 @@ use warnings;
 
 use Win32::API;
 use Doom::Defs qw(SCREENWIDTH SCREENHEIGHT);
+use Doom::Profile;
 
 use constant SDL_INIT_AUDIO           => 0x00000010;
 use constant SDL_INIT_VIDEO           => 0x00000020;
@@ -30,6 +31,15 @@ use constant SDL_PIXELFORMAT_ARGB8888 => 0x16362004;
 use constant SDL_TEXTUREACCESS_STREAMING => 1;
 use constant SDL_QUIT                 => 0x100;
 use constant SDL_KEYDOWN              => 0x300;
+use constant SDL_MOUSEMOTION          => 0x400;
+use constant SDL_MOUSEBUTTONDOWN      => 0x401;
+use constant SDL_MOUSEBUTTONUP        => 0x402;
+use constant SDL_WINDOW_FULLSCREEN_DESKTOP => 0x00001001;
+use constant KEY_RETURN               => 13;
+use constant KEY_KP_ENTER             => 1073741912;
+use constant KEY_LALT                 => 1073742050;
+use constant KEY_RALT                 => 1073742054;
+use constant KMOD_ALT                 => 0x0300;
 
 my $SDL = 'SDL2';
 
@@ -42,7 +52,7 @@ sub _fn {
 
 sub new {
     my ($class) = @_;
-    return bless {
+    my $self = bless {
         window   => 0,
         renderer => 0,
         texture  => 0,
@@ -52,13 +62,17 @@ sub new {
         down     => {},
         audio    => 0,
         channels => [map { {} } 1 .. 8],
+        mdx => 0, mdy => 0, mouseb => 0,
     }, $class;
+    $self->_build_pair;
+    return $self;
 }
 
 sub init {
     my ($self, $scale, $vsync) = @_;
     $scale = 2 if !$scale || $scale < 1;
     $self->{vsync} = $vsync ? 1 : 0;
+    $self->{scale} = $scale;
     my $hint = _fn('SDL_SetHint', 'PP', 'I');
     $hint->Call('SDL_RENDER_VSYNC', $self->{vsync} ? '1' : '0') if !$self->{vsync};
     my $init = _fn('SDL_Init', 'I', 'I');
@@ -82,6 +96,7 @@ sub init {
         $renderer = $rend->Call($window, -1, 0);
     }
     die 'SDL_CreateRenderer: ' . _error() if !$renderer;
+    _fn('SDL_RenderSetLogicalSize', 'NII', 'I')->Call($renderer, SCREENWIDTH, SCREENHEIGHT);
     if (!$self->{vsync}) {
         my $set = _fn('SDL_RenderSetVSync', 'NI', 'I');
         $set->Call($renderer, 0);
@@ -105,6 +120,39 @@ sub init {
     my $mouse = _fn('SDL_ShowCursor', 'I', 'I');
     $mouse->Call(0);
     $self->_open_audio;
+    return;
+}
+
+sub set_scale {
+    my ($self, $scale) = @_;
+    $scale = 1 if !$scale || $scale < 1;
+    $scale = 6 if $scale > 6;
+    return 0 if $scale == ($self->{scale} || 0) || !$self->{window};
+    $self->{scale} = $scale;
+    $self->_apply_window_size if !$self->{fullscreen};
+    return 1;
+}
+
+sub toggle_fullscreen {
+    my ($self) = @_;
+    return if !$self->{window};
+    $self->{full} ||= _fn('SDL_SetWindowFullscreen', 'NI', 'I');
+    my $next = $self->{fullscreen} ? 0 : 1;
+    my $flag = $next ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0;
+    return if $self->{full}->Call($self->{window}, $flag) != 0;
+    $self->{fullscreen} = $next;
+    $self->_apply_window_size if !$next;
+    return;
+}
+
+sub _apply_window_size {
+    my ($self) = @_;
+    return if !$self->{window};
+    my $scale = $self->{scale} || 2;
+    $self->{set_size} ||= _fn('SDL_SetWindowSize', 'NII', '');
+    $self->{set_size}->Call($self->{window}, SCREENWIDTH * $scale, SCREENHEIGHT * $scale);
+    my $pos = $self->{set_pos} ||= _fn('SDL_SetWindowPosition', 'NII', '');
+    $pos->Call($self->{window}, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     return;
 }
 
@@ -219,19 +267,20 @@ sub _error {
 
 sub set_palette {
     my ($self, $pal) = @_;
-    $self->{palette} = substr($pal, 0, 768);
+    $pal = substr($pal, 0, 768);
+    return if $self->{pair} && $pal eq $self->{palette};
+    $self->{palette} = $pal;
+    $self->_build_pair;
     return;
 }
 
-sub upload {
-    my ($self, $fb) = @_;
+sub _build_pair {
+    my ($self) = @_;
     my $pal = $self->{palette};
-    my $pix = $self->{pixels};
-    my $n = SCREENWIDTH * SCREENHEIGHT;
-    for my $i (0 .. $n - 1) {
-        my $c = ord(substr($fb, $i, 1));
-        my $at = $c * 3;
-        substr($pix, $i * 4, 4) = pack(
+    my @lut;
+    for my $i (0 .. 255) {
+        my $at = $i * 3;
+        $lut[$i] = pack(
             'C4',
             ord(substr($pal, $at + 2, 1)),
             ord(substr($pal, $at + 1, 1)),
@@ -239,17 +288,45 @@ sub upload {
             255,
         );
     }
+    # vec de 16 bits trata o primeiro byte como a parte alta.
+    # A chave (p0 << 8) | p1 acompanha essa ordem, em qualquer CPU.
+    my @pair;
+    $#pair = 65535;
+    for my $p0 (0 .. 255) {
+        my $a = $lut[$p0];
+        my $base = $p0 << 8;
+        for my $p1 (0 .. 255) {
+            $pair[$base | $p1] = $a . $lut[$p1];
+        }
+    }
+    $self->{pair} = \@pair;
+    return;
+}
+
+sub upload {
+    my ($self, $fb) = @_;
+    my $pt = $Doom::Profile::ON ? Doom::Profile::now() : 0;
+    my $pair = $self->{pair};
+    my $pix = $self->{pixels};
+    my $n = (SCREENWIDTH * SCREENHEIGHT) >> 1;
+    for (my $i = 0; $i < $n; $i++) {
+        substr($pix, $i << 3, 8) = $pair->[vec($fb, $i, 16)];
+    }
     $self->{pixels} = $pix;
+    Doom::Profile::add('upload', Doom::Profile::now() - $pt) if $pt;
     return;
 }
 
 sub present {
+    my $pt = $Doom::Profile::ON ? Doom::Profile::now() : 0;
     my ($self) = @_;
     $self->_pump_audio;
     $self->{update}->Call($self->{texture}, 0, $self->{pixels}, SCREENWIDTH * 4);
     $self->{clear}->Call($self->{renderer});
     $self->{copy}->Call($self->{renderer}, $self->{texture}, 0, 0);
     $self->{present}->Call($self->{renderer});
+    Doom::Profile::add('present', Doom::Profile::now() - $pt) if $pt;
+    Doom::Profile::frame() if $Doom::Profile::ON;
     return;
 }
 
@@ -262,11 +339,52 @@ sub pump {
         return -1 if $type == SDL_QUIT;
         if ($type == SDL_KEYDOWN || $type == 0x301) {
             my $sym = unpack('V', substr($event, 20, 4));
+            my $mod = unpack('v', substr($event, 24, 2));
+            my $repeat = ord(substr($event, 13, 1));
+            my $alt = ($mod & KMOD_ALT) || $self->{down}{KEY_LALT} || $self->{down}{KEY_RALT};
+            if ($type == SDL_KEYDOWN && !$repeat && $alt
+                && ($sym == KEY_RETURN || $sym == KEY_KP_ENTER)) {
+                $self->{down}{$sym} = 0;
+                $self->toggle_fullscreen;
+                next;
+            }
             $self->{down}{$sym} = $type == SDL_KEYDOWN ? 1 : 0;
             $found = $sym if $type == SDL_KEYDOWN && !$found;
         }
+        elsif ($type == SDL_MOUSEMOTION) {
+            $self->{mdx} += unpack('l', substr($event, 28, 4));
+            $self->{mdy} += unpack('l', substr($event, 32, 4));
+        }
+        elsif ($type == SDL_MOUSEBUTTONDOWN || $type == SDL_MOUSEBUTTONUP) {
+            my $button = ord(substr($event, 16, 1));
+            $self->{mouseb} = $type == SDL_MOUSEBUTTONDOWN ? 1 : 0 if $button == 1;
+        }
     }
     return $found;
+}
+
+sub take_mouse {
+    my ($self) = @_;
+    my ($x, $y) = ($self->{mdx} || 0, $self->{mdy} || 0);
+    $self->{mdx} = 0;
+    $self->{mdy} = 0;
+    return ($x, $y);
+}
+
+sub mouse_fire {
+    return $_[0]{mouseb} ? 1 : 0;
+}
+
+sub grab_mouse {
+    my ($self, $on) = @_;
+    $on = $on ? 1 : 0;
+    return if ($self->{grabbed} || 0) == $on;
+    my $rel = eval { _fn('SDL_SetRelativeMouseMode', 'I', 'I') };
+    $rel->Call($on) if $rel;
+    my $cur = eval { _fn('SDL_ShowCursor', 'I', 'I') };
+    $cur->Call($on ? 0 : 1) if $cur;
+    $self->{grabbed} = $on;
+    return;
 }
 
 sub down {

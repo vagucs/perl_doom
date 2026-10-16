@@ -26,6 +26,7 @@ use Doom::Defs qw(
     SIL_BOTH SIL_BOTTOM SIL_NONE SIL_TOP
 );
 use Doom::Tables qw(init_tables fine_sin fine_cos slope_div);
+use Doom::Profile;
 
 use constant HEIGHTBITS => 12;
 use constant HEIGHTUNIT => 4096;
@@ -82,6 +83,7 @@ sub set_view_size {
     $self->_init_mapping;
     $self->_init_slopes;
     $self->_init_lights;
+    $self->{lookapplied} = -999;
     return;
 }
 
@@ -227,6 +229,17 @@ sub setup_frame {
     $self->{viewx} = $x;
     $self->{viewy} = $y;
     $self->{viewz} = $z;
+    my $base = int($self->{viewheight} / 2);
+    my $look = $self->{look} || 0;
+    my $cap = $base > 1 ? $base - 1 : 0;
+    $look = $cap if $look > $cap;
+    $look = -$cap if $look < -$cap;
+    if ($look != ($self->{lookapplied} || 0)) {
+        $self->{centery} = $base + $look;
+        $self->{centeryfrac} = $self->{centery} << FRACBITS;
+        $self->_init_slopes;
+        $self->{lookapplied} = $look;
+    }
     $self->{viewangle} = as_u32($angle);
     $self->{viewsin} = fine_sin($self->{viewangle});
     $self->{viewcos} = fine_cos($self->{viewangle});
@@ -240,6 +253,7 @@ sub setup_frame {
 }
 
 sub render {
+    my $pt = $Doom::Profile::ON ? Doom::Profile::now() : 0;
     my ($self, $world) = @_;
     $self->{fb} = "\0" x (SCREENWIDTH * SCREENHEIGHT);
     $self->{visplanes} = [];
@@ -252,6 +266,7 @@ sub render {
         $self->_subsector($world, 0);
     }
     $self->_draw_planes;
+    Doom::Profile::add('render', Doom::Profile::now() - $pt) if $pt;
     return $self->{fb};
 }
 
@@ -671,6 +686,14 @@ sub _push_drawseg {
                 $ds->{bsilheight} = $imax;
             }
         }
+        if ($back->{ceilingheight} <= $back->{floorheight}) {
+            my $width = $stop - $start + 1;
+            $ds->{silhouette} = SIL_BOTH;
+            $ds->{bsilheight} = $imax;
+            $ds->{tsilheight} = $imin;
+            $ds->{sprtopclip} = [($self->{viewheight}) x $width];
+            $ds->{sprbottomclip} = [(-1) x $width];
+        }
     }
     push @{$self->{drawsegs}}, $ds;
     return;
@@ -787,13 +810,27 @@ sub _render_seg_loop {
 }
 
 sub _draw_column {
+    my $pt = $Doom::Profile::ON ? Doom::Profile::now() : 0;
     my ($self) = @_;
     my $count = $self->{dc_yh} - $self->{dc_yl};
-    return if $count < 0 || $self->{dc_x} < 0 || $self->{dc_x} >= $self->{viewwidth};
+    if ($count < 0 || $self->{dc_x} < 0 || $self->{dc_x} >= $self->{viewwidth}) {
+        Doom::Profile::add('column', Doom::Profile::now() - $pt) if $pt;
+        return;
+    }
     my $yl = $self->{dc_yl};
     $yl = 0 if $yl < 0;
     $yl = SCREENHEIGHT - 1 if $yl > SCREENHEIGHT - 1;
-    my $dest = $self->{ylookup}[$yl] + $self->{columnofs}[$self->{dc_x}];
+    my $x = $self->{dc_x};
+    my $wide = 0;
+    if ($self->{detailshift}) {
+        $x <<= 1;
+        if ($x < 0 || $x + 1 >= SCREENWIDTH) {
+            Doom::Profile::add('column', Doom::Profile::now() - $pt) if $pt;
+            return;
+        }
+        $wide = 1;
+    }
+    my $dest = $self->{ylookup}[$yl] + $self->{columnofs}[$x];
     my $fracstep = $self->{dc_iscale};
     my $frac = $self->{dc_texturemid} + ($self->{dc_yl} - $self->{centery}) * $fracstep;
     my $src = $self->{dc_source};
@@ -805,12 +842,18 @@ sub _draw_column {
         if ($slen) {
             my $pix = ord(substr($src, $idx % $slen, 1));
             my $val = $pix < length($cm) ? ord(substr($cm, $pix, 1)) : $pix;
-            substr($self->{fb}, $dest, 1) = chr($val);
+            if ($wide && $dest + 1 < $limit) {
+                substr($self->{fb}, $dest, 2) = chr($val) x 2;
+            }
+            else {
+                substr($self->{fb}, $dest, 1) = chr($val);
+            }
         }
         $dest += SCREENWIDTH;
         $frac = as_i32($frac + $fracstep);
         $count--;
     }
+    Doom::Profile::add('column', Doom::Profile::now() - $pt) if $pt;
     return;
 }
 
@@ -910,55 +953,97 @@ sub _draw_masked_column {
 }
 
 sub _draw_planes {
+    my $pt = $Doom::Profile::ON ? Doom::Profile::now() : 0;
     my ($self) = @_;
+    my $res = $self->{res};
+    my @cmcache = map { $res->colormap($_) } 0 .. 32;
+    my $yslope = $self->{yslope};
+    my $ylookup = $self->{ylookup};
+    my $distscale = $self->{distscale};
+    my $xtoview = $self->{xtoviewangle};
+    my $cols = $self->{columnofs};
+    my $finesine = \@Doom::Tables::FINESINE;
+    my $viewx = $self->{viewx};
+    my $viewy = $self->{viewy};
+    my $viewangle = $self->{viewangle};
+    my $viewz = $self->{viewz};
+    my $viewh = $self->{viewheight};
+    my $vieww = $self->{viewwidth};
+    my $extralight = $self->{extralight};
+    my $wide = $self->{detailshift};
+    my $fixedcm = $self->{fixedcolormap};
+    my $sky = $res->{skyflatnum};
+    my $zlight = $self->{zlight};
+    my $limit = SCREENWIDTH * SCREENHEIGHT;
+    my $quarter = int(FINEANGLES / 4);
     for my $pl (@{$self->{visplanes}}) {
         next if $pl->{minx} > $pl->{maxx};
-        if ($pl->{picnum} == $self->{res}{skyflatnum}) {
+        if ($pl->{picnum} == $sky) {
             $self->{dc_iscale} = int(9 * FRACUNIT / 10);
-            $self->{dc_colormap} = $self->{res}->colormap(0);
+            $self->{dc_colormap} = $res->colormap(0);
             $self->{dc_texturemid} = 100 * FRACUNIT;
             for my $x ($pl->{minx} .. $pl->{maxx}) {
                 my ($yl, $yh) = ($pl->{top}[$x], $pl->{bottom}[$x]);
                 if ($yl <= $yh && $yl < 0xFF) {
-                    my $ang = ushr(as_u32($self->{viewangle} + $self->{xtoviewangle}[$x]), ANGLETOSKYSHIFT);
+                    my $ang = ushr(as_u32($viewangle + $xtoview->[$x]), ANGLETOSKYSHIFT);
                     $self->{dc_x} = $x;
                     $self->{dc_yl} = $yl;
                     $self->{dc_yh} = $yh;
-                    $self->{dc_source} = $self->{res}->get_column($self->{res}{skytexture}, $ang);
+                    $self->{dc_source} = $res->get_column($res->{skytexture}, $ang);
                     $self->_draw_column;
                 }
             }
             next;
         }
-        my $light = ($pl->{lightlevel} >> 4) + $self->{extralight};
+        my $light = ($pl->{lightlevel} >> 4) + $extralight;
         $light = 0 if $light < 0;
         $light = LIGHTLEVELS - 1 if $light > LIGHTLEVELS - 1;
-        my $planezlight = $self->{zlight}[$light];
-        my $flat = $self->{res}->flat_pixels($pl->{picnum});
-        my $planeheight = abs_fixed($pl->{height} - $self->{viewz});
+        my $planezlight = $zlight->[$light];
+        my $flat = $res->flat_pixels($pl->{picnum});
+        my $flen = length($flat);
+        my $planeheight = abs_fixed($pl->{height} - $viewz);
         next if $planeheight == 0;
         my $x0 = $pl->{minx} < 0 ? 0 : $pl->{minx};
-        my $x1 = $pl->{maxx} >= $self->{viewwidth} ? $self->{viewwidth} - 1 : $pl->{maxx};
+        my $x1 = $pl->{maxx} >= $vieww ? $vieww - 1 : $pl->{maxx};
+        my $fb = $self->{fb};
+        my $bottom = $viewh - 1;
         for my $x ($x0 .. $x1) {
             my ($t1, $b1) = ($pl->{top}[$x], $pl->{bottom}[$x]);
             next if $t1 > $b1 || $t1 == 0xFF;
-            my $y1 = $b1 < $self->{viewheight} - 1 ? $b1 : $self->{viewheight} - 1;
+            my $y1 = $b1 < $bottom ? $b1 : $bottom;
+            my $ang = ushr(as_u32($viewangle + $xtoview->[$x]), ANGLETOFINESHIFT) & FINEMASK;
+            my $sin = $finesine->[$ang];
+            my $cos = $finesine->[($ang + $quarter) & FINEMASK];
+            my $scale = $distscale->[$x];
+            my $xx = $wide ? ($x << 1) : $x;
+            my $col = $cols->[$xx];
             for my $y ($t1 .. $y1) {
-                my $distance = fixed_mul($planeheight, $self->{yslope}[$y]);
-                my $length = fixed_mul($distance, $self->{distscale}[$x]);
-                my $ang = ushr(as_u32($self->{viewangle} + $self->{xtoviewangle}[$x]), ANGLETOFINESHIFT) & FINEMASK;
-                my $ds_xfrac = $self->{viewx} + fixed_mul($Doom::Tables::FINESINE[($ang + int(FINEANGLES / 4)) & FINEMASK], $length);
-                my $ds_yfrac = -$self->{viewy} - fixed_mul($Doom::Tables::FINESINE[$ang], $length);
+                my $distance = fixed_mul($planeheight, $yslope->[$y]);
+                my $length = fixed_mul($distance, $scale);
+                my $ds_xfrac = $viewx + fixed_mul($cos, $length);
+                my $ds_yfrac = -$viewy - fixed_mul($sin, $length);
                 my $index = ushr($distance, LIGHTZSHIFT);
                 $index = MAXLIGHTZ - 1 if $index > MAXLIGHTZ - 1;
-                my $cm = $self->{fixedcolormap} || $self->{res}->colormap($planezlight->[$index]);
+                my $level = $planezlight->[$index];
+                $level = 0 if $level < 0;
+                $level = 32 if $level > 32;
+                my $cm = $fixedcm || $cmcache[$level];
+                my $cml = length($cm);
                 my $spot = (($ds_xfrac >> 16) & 63) | (($ds_yfrac >> 10) & 0x0FC0);
-                my $pix = ord(substr($flat, $spot < length($flat) ? $spot : 0, 1));
-                $pix = ord(substr($cm, $pix, 1)) if $pix < length($cm);
-                substr($self->{fb}, $self->{ylookup}[$y] + $self->{columnofs}[$x], 1) = chr($pix);
+                my $pix = ord(substr($flat, $spot < $flen ? $spot : 0, 1));
+                $pix = ord(substr($cm, $pix, 1)) if $pix < $cml;
+                my $off = $ylookup->[$y] + $col;
+                if ($wide && $off + 1 < $limit) {
+                    substr($fb, $off, 2) = chr($pix) x 2;
+                }
+                else {
+                    substr($fb, $off, 1) = chr($pix);
+                }
             }
         }
+        $self->{fb} = $fb;
     }
+    Doom::Profile::add('planes', Doom::Profile::now() - $pt) if $pt;
     return;
 }
 

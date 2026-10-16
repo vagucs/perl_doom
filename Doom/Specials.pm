@@ -64,6 +64,14 @@ my @SWITCHES = (
 );
 
 use constant FLOORSPEED => FRACUNIT;
+use constant CEILSPEED => FRACUNIT;
+use constant CEIL_CRUSHANDRAISE => 1;
+use constant CEIL_FASTCRUSH => 2;
+use constant CEIL_LOWERANDCRUSH => 3;
+use constant CEIL_LOWERTOFLOOR => 4;
+use constant CEIL_RAISETOHIGHEST => 5;
+use constant CEIL_SILENTCRUSH => 6;
+use constant RESULT_CRUSHED => 1;
 use constant PLAT_DOWN => 0;
 use constant PLAT_UP => 1;
 use constant PLAT_WAIT => 2;
@@ -75,7 +83,7 @@ use constant SLOWDARK => 35;
 sub new {
     my ($class, $world, $res) = @_;
     my $self = bless {
-        world => $world, thinkers => [], buttons => [], switch => {},
+        world => $world, res => $res, thinkers => [], buttons => [], switch => {},
         lights => [], scroll => [], exit => 0, time => 0,
     }, $class;
     if ($res) {
@@ -104,6 +112,7 @@ sub tick {
         $self->_tick_door($th) if $kind eq 'door';
         $self->_tick_floor($th) if $kind eq 'floor';
         $self->_tick_plat($th) if $kind eq 'plat';
+        $self->_tick_ceil($th) if $kind eq 'ceil';
         push @alive, $th if !$th->{dead};
     }
     $self->{thinkers} = \@alive;
@@ -164,48 +173,73 @@ sub use_special {
         $self->change_switch($line, 0) if $self->_donut($line);
         return 1;
     }
-    return 0;
+    if ($spec == 99) {
+        $self->_locked_blaze($line, $thing, $spec);
+        return 1;
+    }
+    return $self->_use_build($line, $spec);
 }
 
 sub shoot_special {
     my ($self, $line, $thing) = @_;
-    return if ($line->{special} || 0) != 46;
-    $self->_door_tag($line, VLD_OPEN);
-    $self->change_switch($line, 1);
+    my $spec = $line->{special} || 0;
+    if ($spec == 46) {
+        $self->_door_tag($line, VLD_OPEN);
+        $self->change_switch($line, 1);
+    }
+    elsif ($spec == 24) {
+        $self->change_switch($line, 0) if $self->_move_floor($line, \&_floor_up_ceil, 1, FLOORSPEED);
+    }
+    elsif ($spec == 47) {
+        $self->change_switch($line, 0) if $self->_plat_raise($line, 0);
+    }
     return;
 }
 
 sub cross_special {
     my ($self, $line, $side, $thing) = @_;
     my $spec = $line->{special} || 0;
+    if ($spec == 52 || $spec == 124) {
+        $self->{exit} = 1;
+        $self->{secret} = 1 if $spec == 124;
+        return;
+    }
     my $clear = 1;
     if ($spec == 36) {
         $self->_floor($line, -1, FLOORSPEED * 4);
     }
-    elsif ($spec == 88) {
+    elsif ($spec == 10 || $spec == 88) {
         $self->_plat($line);
-        $clear = 0;
+        $clear = 0 if $spec == 88;
     }
     elsif ($spec == 108 || $spec == 109 || $spec == 110) {
         my $type = $spec == 108 ? VLD_BLAZERAISE
             : $spec == 110 ? VLD_BLAZECLOSE : VLD_BLAZEOPEN;
         $self->_door_tag($line, $type);
     }
-    elsif ($spec == 8) {
+    elsif ($spec == 8 || $spec == 100) {
         return if !$thing->{player};
-        $self->_stairs($line, 8 * FRACUNIT, int(FLOORSPEED / 4) || 1);
+        if ($spec == 100) {
+            $self->_stairs($line, 16 * FRACUNIT, FLOORSPEED * 4);
+        }
+        else {
+            $self->_stairs($line, 8 * FRACUNIT, int(FLOORSPEED / 4) || 1);
+        }
     }
     elsif ($spec == 2 || $spec == 3 || $spec == 4) {
         return if $spec != 4 && !$thing->{player};
         my $type = $spec == 2 ? VLD_OPEN : $spec == 3 ? VLD_CLOSE : VLD_NORMAL;
         $self->_door_tag($line, $type);
     }
-    elsif ($spec == 39 || $spec == 97) {
-        my $ok = $self->_teleport($line, $side, $thing);
-        $clear = 0 if $spec == 97 || !$ok;
+    elsif ($spec == 39 || $spec == 97 || $spec == 125 || $spec == 126) {
+        my $monster = $spec == 125 || $spec == 126;
+        my $ok = (!$monster || !$thing->{player}) && $self->_teleport($line, $side, $thing);
+        $clear = 0 if $spec == 97 || $spec == 126 || ($spec == 39 && !$ok);
     }
     else {
-        return;
+        my $mode = $self->_cross_build($line, $spec);
+        return if !$mode;
+        $clear = 0 if $mode eq 'again';
     }
     $line->{special} = 0 if $clear;
     return;
@@ -324,6 +358,8 @@ sub _spawn_specials {
         $self->_light_strobe($sector, SLOWDARK, 1) if $spec == 12;
         $self->_light_strobe($sector, FASTDARK, 1) if $spec == 13;
         $self->_light_fire($sector) if $spec == 17;
+        $self->_door_wait($sector, VLD_CLOSE, 30 * TICRATE) if $spec == 10;
+        $self->_door_wait($sector, VLD_RAISEIN5, 5 * 60 * TICRATE) if $spec == 14;
     }
     for my $ln (@{$self->{world}{lines} || []}) {
         push @{$self->{scroll}}, $ln if ($ln->{special} || 0) == 48;
@@ -596,6 +632,452 @@ sub _tagged {
     return grep { ($_->{tag} || 0) == $tag } @{$self->{world}{sectors}};
 }
 
+sub _use_build {
+    my ($self, $line, $spec) = @_;
+    my $again = 0;
+    my $ok = 0;
+    if ($spec == 29 || $spec == 63) {
+        $ok = $self->_door_tag($line, VLD_NORMAL);
+        $again = $spec == 63;
+    }
+    elsif ($spec == 50 || $spec == 42) {
+        $ok = $self->_door_tag($line, VLD_CLOSE);
+        $again = $spec == 42;
+    }
+    elsif ($spec == 61) {
+        $ok = $self->_door_tag($line, VLD_OPEN);
+        $again = 1;
+    }
+    elsif ($spec == 111) {
+        $ok = $self->_door_tag($line, VLD_BLAZERAISE);
+    }
+    elsif ($spec == 112) {
+        $ok = $self->_door_tag($line, VLD_BLAZEOPEN);
+    }
+    elsif ($spec == 113 || $spec == 116) {
+        $ok = $self->_door_tag($line, VLD_BLAZECLOSE);
+        $again = $spec == 116;
+    }
+    elsif ($spec == 115) {
+        $ok = $self->_door_tag($line, VLD_BLAZEOPEN);
+        $again = 1;
+    }
+    elsif ($spec == 21 || $spec == 62) {
+        $ok = $self->_plat($line);
+        $again = $spec == 62;
+    }
+    elsif ($spec == 122 || $spec == 120 || $spec == 123) {
+        $ok = $self->_plat($line, 1);
+        $again = $spec != 122;
+    }
+    elsif ($spec == 18 || $spec == 69) {
+        $ok = $self->_move_floor($line, \&_floor_next, 1, FLOORSPEED);
+        $again = $spec == 69;
+    }
+    elsif ($spec == 131 || $spec == 132) {
+        $ok = $self->_move_floor($line, \&_floor_next, 1, FLOORSPEED * 4);
+        $again = $spec == 132;
+    }
+    elsif ($spec == 23 || $spec == 60) {
+        $ok = $self->_move_floor($line, \&_lowest_floor, -1, FLOORSPEED);
+        $again = $spec == 60;
+    }
+    elsif ($spec == 71 || $spec == 45) {
+        $ok = $self->_move_floor($line, \&_highest_floor, -1, FLOORSPEED);
+        $again = $spec == 45;
+    }
+    elsif ($spec == 70) {
+        $ok = $self->_move_floor($line, \&_highest_floor, -1, FLOORSPEED * 4);
+        $again = 1;
+    }
+    elsif ($spec == 101 || $spec == 64) {
+        $ok = $self->_move_floor($line, \&_floor_up_ceil, 1, FLOORSPEED);
+        $again = $spec == 64;
+    }
+    elsif ($spec == 55 || $spec == 65) {
+        $ok = $self->_move_floor($line, \&_floor_crush_dest, 1, FLOORSPEED, 1);
+        $again = $spec == 65;
+    }
+    elsif ($spec == 140) {
+        $ok = $self->_move_floor($line, sub { $_[0]{floorheight} + 512 * FRACUNIT }, 1, FLOORSPEED);
+    }
+    elsif ($spec == 7) {
+        $ok = $self->_stairs($line, 8 * FRACUNIT, int(FLOORSPEED / 4) || 1);
+    }
+    elsif ($spec == 127) {
+        $ok = $self->_stairs($line, 16 * FRACUNIT, FLOORSPEED * 4);
+    }
+    elsif ($spec == 41 || $spec == 43) {
+        $ok = $self->_crusher($line, CEIL_LOWERTOFLOOR);
+        $again = $spec == 43;
+    }
+    elsif ($spec == 49) {
+        $ok = $self->_crusher($line, CEIL_CRUSHANDRAISE);
+    }
+    elsif ($spec == 14 || $spec == 67) {
+        $ok = $self->_plat_raise($line, 32 * FRACUNIT);
+        $again = $spec == 67;
+    }
+    elsif ($spec == 15 || $spec == 66) {
+        $ok = $self->_plat_raise($line, 24 * FRACUNIT);
+        $again = $spec == 66;
+    }
+    elsif ($spec == 20 || $spec == 68) {
+        $ok = $self->_plat_raise($line, 0);
+        $again = $spec == 68;
+    }
+    elsif ($spec == 138) {
+        $ok = $self->_light_on($line, 255);
+        $again = 1;
+    }
+    elsif ($spec == 139) {
+        $ok = $self->_light_on($line, 35);
+        $again = 1;
+    }
+    else {
+        return 0;
+    }
+    $self->change_switch($line, $again) if $ok;
+    return $ok ? 1 : 0;
+}
+
+sub _cross_build {
+    my ($self, $line, $spec) = @_;
+    my %once = (
+        5 => sub { $self->_move_floor($line, \&_floor_up_ceil, 1, FLOORSPEED) },
+        6 => sub { $self->_crusher($line, CEIL_FASTCRUSH) },
+        12 => sub { $self->_light_on($line, 0) },
+        13 => sub { $self->_light_on($line, 255) },
+        16 => sub { $self->_door_tag($line, VLD_CLOSE30) },
+        17 => sub { $self->_light_walk($line) },
+        19 => sub { $self->_move_floor($line, \&_highest_floor, -1, FLOORSPEED) },
+        22 => sub { $self->_plat_raise($line, 0) },
+        25 => sub { $self->_crusher($line, CEIL_CRUSHANDRAISE) },
+        30 => sub { $self->_raise_texture($line) },
+        35 => sub { $self->_light_on($line, 35) },
+        37 => sub { $self->_lower_change($line) },
+        38 => sub { $self->_move_floor($line, \&_lowest_floor, -1, FLOORSPEED) },
+        44 => sub { $self->_crusher($line, CEIL_LOWERANDCRUSH) },
+        53 => sub { $self->_plat_forever($line) },
+        54 => sub { $self->_stop_plat($line) },
+        56 => sub { $self->_move_floor($line, \&_floor_crush_dest, 1, FLOORSPEED, 1) },
+        57 => sub { $self->_stop_plat($line) },
+        58 => sub { $self->_move_floor($line, sub { $_[0]{floorheight} + 24 * FRACUNIT }, 1, FLOORSPEED) },
+        59 => sub { $self->_move_floor($line, sub { $_[0]{floorheight} + 24 * FRACUNIT }, 1, FLOORSPEED) },
+        104 => sub { $self->_light_off($line) },
+        119 => sub { $self->_move_floor($line, \&_floor_next, 1, FLOORSPEED) },
+        121 => sub { $self->_plat($line, 1) },
+        130 => sub { $self->_move_floor($line, \&_floor_next, 1, FLOORSPEED * 4) },
+        141 => sub { $self->_crusher($line, CEIL_SILENTCRUSH) },
+    );
+    my %again = (
+        72 => sub { $self->_crusher($line, CEIL_LOWERANDCRUSH) },
+        73 => sub { $self->_crusher($line, CEIL_CRUSHANDRAISE) },
+        74 => sub { $self->_stop_plat($line) },
+        75 => sub { $self->_door_tag($line, VLD_CLOSE) },
+        76 => sub { $self->_door_tag($line, VLD_CLOSE30) },
+        77 => sub { $self->_crusher($line, CEIL_FASTCRUSH) },
+        79 => sub { $self->_light_on($line, 35) },
+        80 => sub { $self->_light_on($line, 0) },
+        81 => sub { $self->_light_on($line, 255) },
+        82 => sub { $self->_move_floor($line, \&_lowest_floor, -1, FLOORSPEED) },
+        83 => sub { $self->_move_floor($line, \&_highest_floor, -1, FLOORSPEED) },
+        84 => sub { $self->_lower_change($line) },
+        86 => sub { $self->_door_tag($line, VLD_OPEN) },
+        87 => sub { $self->_plat_forever($line) },
+        89 => sub { $self->_stop_plat($line) },
+        90 => sub { $self->_door_tag($line, VLD_NORMAL) },
+        91 => sub { $self->_move_floor($line, \&_floor_up_ceil, 1, FLOORSPEED) },
+        92 => sub { $self->_move_floor($line, sub { $_[0]{floorheight} + 24 * FRACUNIT }, 1, FLOORSPEED) },
+        93 => sub { $self->_move_floor($line, sub { $_[0]{floorheight} + 24 * FRACUNIT }, 1, FLOORSPEED) },
+        94 => sub { $self->_move_floor($line, \&_floor_crush_dest, 1, FLOORSPEED, 1) },
+        95 => sub { $self->_plat_raise($line, 0) },
+        96 => sub { $self->_raise_texture($line) },
+        98 => sub { $self->_move_floor($line, \&_highest_floor, -1, FLOORSPEED * 4) },
+        105 => sub { $self->_door_tag($line, VLD_BLAZERAISE) },
+        106 => sub { $self->_door_tag($line, VLD_BLAZEOPEN) },
+        107 => sub { $self->_door_tag($line, VLD_BLAZECLOSE) },
+        120 => sub { $self->_plat($line, 1) },
+        128 => sub { $self->_move_floor($line, \&_floor_next, 1, FLOORSPEED) },
+        129 => sub { $self->_move_floor($line, \&_floor_next, 1, FLOORSPEED * 4) },
+    );
+    if ($spec == 40) {
+        $self->_crusher($line, CEIL_RAISETOHIGHEST);
+        $self->_move_floor($line, \&_lowest_floor, -1, FLOORSPEED);
+        return 'once';
+    }
+    if ($once{$spec}) {
+        $once{$spec}->();
+        return 'once';
+    }
+    if ($again{$spec}) {
+        $again{$spec}->();
+        return 'again';
+    }
+    return '';
+}
+
+sub _move_floor {
+    my ($self, $line, $dest_fn, $dir, $speed, $crush) = @_;
+    my $ok = 0;
+    for my $sector ($self->_tagged($line->{tag})) {
+        $ok = 1 if $self->_start_floor($sector, $dest_fn->($sector), $dir, $speed, undef, $crush);
+    }
+    return $ok;
+}
+
+sub _floor_up_ceil {
+    my ($sector) = @_;
+    my $dest = lowest_ceiling($sector);
+    return $dest <= $sector->{ceilingheight} ? $dest : $sector->{ceilingheight};
+}
+
+sub _floor_crush_dest {
+    return _floor_up_ceil($_[0]) - 8 * FRACUNIT;
+}
+
+sub _floor_next {
+    return _next_floor($_[0], $_[0]{floorheight});
+}
+
+sub _next_floor {
+    my ($sector, $current) = @_;
+    my $min = 0x7FFFFFFF;
+    my $found = 0;
+    for my $other (surrounding_sectors($sector)) {
+        my $h = $other->{floorheight};
+        if ($h > $current && $h < $min) {
+            $min = $h;
+            $found = 1;
+        }
+    }
+    return $found ? $min : $current;
+}
+
+sub _highest_ceiling {
+    my ($sector) = @_;
+    my $h = $sector->{ceilingheight};
+    for my $other (surrounding_sectors($sector)) {
+        $h = $other->{ceilingheight} if $other->{ceilingheight} > $h;
+    }
+    return $h;
+}
+
+sub _crusher {
+    my ($self, $line, $ctype) = @_;
+    my $ok = 0;
+    for my $sec ($self->_tagged($line->{tag})) {
+        next if $sec->{specialdata};
+        my $top = $sec->{ceilingheight};
+        my $bottom = $sec->{floorheight};
+        my $crush = $ctype != CEIL_RAISETOHIGHEST;
+        my $speed = CEILSPEED * ($ctype == CEIL_FASTCRUSH ? 2 : 1);
+        my ($dir, $dest) = (-1, $bottom);
+        if ($ctype == CEIL_RAISETOHIGHEST) {
+            $dest = _highest_ceiling($sec);
+            $dir = 1;
+            $crush = 0;
+        }
+        elsif ($ctype != CEIL_LOWERTOFLOOR) {
+            $bottom += 8 * FRACUNIT;
+            $dest = $bottom;
+        }
+        my $ceil = {
+            kind => 'ceil', sector => $sec, direction => $dir, dest => $dest,
+            speed => $speed, crush => $crush, ctype => $ctype,
+            topheight => $top, bottomheight => $bottom, dead => 0,
+        };
+        $sec->{specialdata} = $ceil;
+        push @{$self->{thinkers}}, $ceil;
+        $ok = 1;
+    }
+    return $ok;
+}
+
+sub _tick_ceil {
+    my ($self, $ceil) = @_;
+    my $dest = $ceil->{dest};
+    $dest = $ceil->{direction} == 1 ? $ceil->{topheight} : $ceil->{bottomheight} if $ceil->{ctype};
+    my $res = move_plane(
+        $self->{world}, $ceil->{sector}, $ceil->{speed}, $dest, 1, $ceil->{direction}, $ceil->{crush}
+    );
+    my $bounce = $ceil->{ctype} == CEIL_CRUSHANDRAISE
+        || $ceil->{ctype} == CEIL_FASTCRUSH
+        || $ceil->{ctype} == CEIL_SILENTCRUSH;
+    if ($res == RESULT_PASTDEST) {
+        if ($bounce) {
+            if ($ceil->{direction} == -1) {
+                $ceil->{direction} = 1;
+                $ceil->{speed} = CEILSPEED * ($ceil->{ctype} == CEIL_FASTCRUSH ? 2 : 1);
+                Doom::Sound::at($self->{world}, 'pstop') if $ceil->{ctype} == CEIL_SILENTCRUSH;
+            }
+            else {
+                $ceil->{direction} = -1;
+                Doom::Sound::at($self->{world}, 'pstop') if $ceil->{ctype} == CEIL_SILENTCRUSH;
+            }
+        }
+        else {
+            $ceil->{sector}{specialdata} = undef;
+            $ceil->{dead} = 1;
+        }
+    }
+    elsif ($res == RESULT_CRUSHED && $bounce) {
+        my $slow = int(CEILSPEED / 8);
+        $ceil->{speed} = $slow > 0 ? $slow : 1;
+    }
+    return;
+}
+
+sub _plat_raise {
+    my ($self, $line, $amount) = @_;
+    my $side = $line->{sides} && $line->{sides}[0];
+    my $pic = $side && $side->{sector} ? $side->{sector}{floorpic} : undef;
+    my $ok = 0;
+    for my $sec ($self->_tagged($line->{tag})) {
+        next if $sec->{specialdata};
+        my $high = $amount ? $sec->{floorheight} + $amount : _next_floor($sec, $sec->{floorheight});
+        $sec->{floorpic} = $pic if defined $pic;
+        my $plat = {
+            kind => 'plat', sector => $sec, status => PLAT_UP,
+            speed => int(FRACUNIT / 2) || 1, low => $sec->{floorheight}, high => $high,
+            wait => 0, count => 0, dead => 0,
+        };
+        $sec->{specialdata} = $plat;
+        push @{$self->{thinkers}}, $plat;
+        Doom::Sound::at($self->{world}, 'pstart');
+        $ok = 1;
+    }
+    return $ok;
+}
+
+sub _plat_forever {
+    my ($self, $line) = @_;
+    my $ok = 0;
+    for my $sec ($self->_tagged($line->{tag})) {
+        next if $sec->{specialdata};
+        my $low = _lowest_floor($sec);
+        my $high = _highest_floor($sec);
+        $low = $sec->{floorheight} if $low > $sec->{floorheight};
+        $high = $sec->{floorheight} if $high < $sec->{floorheight};
+        my $plat = {
+            kind => 'plat', sector => $sec, perpetual => 1,
+            status => Doom::Attack::p_random() & 1, speed => FRACUNIT,
+            low => $low, high => $high, wait => 3 * TICRATE, count => 0, dead => 0,
+        };
+        $sec->{specialdata} = $plat;
+        push @{$self->{thinkers}}, $plat;
+        Doom::Sound::at($self->{world}, 'pstart');
+        $ok = 1;
+    }
+    return $ok;
+}
+
+sub _stop_plat {
+    my ($self, $line) = @_;
+    my $ok = 0;
+    for my $th (@{$self->{thinkers}}) {
+        next if ($th->{kind} || '') ne 'plat' || $th->{dead};
+        next if ($th->{sector}{tag} || 0) != ($line->{tag} || 0);
+        $th->{status} = PLAT_WAIT;
+        $th->{count} = 0x7FFFFFFF;
+        $ok = 1;
+    }
+    return $ok;
+}
+
+sub _raise_texture {
+    my ($self, $line) = @_;
+    my $ok = 0;
+    for my $sec ($self->_tagged($line->{tag})) {
+        next if $sec->{specialdata};
+        my $minsize = 0x7FFFFFFF;
+        for my $ln (@{$sec->{lines} || []}) {
+            next if !(($ln->{flags} || 0) & ML_TWOSIDED);
+            for my $side (@{$ln->{sides} || []}) {
+                next if !$side || ($side->{bottomtexture} || 0) <= 0 || !$self->{res};
+                my $h = $self->{res}->texture_height($side->{bottomtexture});
+                $minsize = $h if $h > 0 && $h < $minsize;
+            }
+        }
+        $minsize = 64 * FRACUNIT if $minsize == 0x7FFFFFFF;
+        $ok = 1 if $self->_start_floor($sec, $sec->{floorheight} + $minsize, 1, FLOORSPEED);
+    }
+    return $ok;
+}
+
+sub _lower_change {
+    my ($self, $line) = @_;
+    my $ok = 0;
+    for my $sec ($self->_tagged($line->{tag})) {
+        next if $sec->{specialdata};
+        my $dest = _lowest_floor($sec);
+        my $pic = $sec->{floorpic};
+        for my $other (surrounding_sectors($sec)) {
+            if ($other->{floorheight} == $dest) {
+                $pic = $other->{floorpic};
+                last;
+            }
+        }
+        $ok = 1 if $self->_start_floor($sec, $dest, -1, FLOORSPEED, $pic);
+    }
+    return $ok;
+}
+
+sub _light_on {
+    my ($self, $line, $bright) = @_;
+    my $ok = 0;
+    for my $sec ($self->_tagged($line->{tag})) {
+        $sec->{lightlevel} = $bright ? $bright : _max_light($sec);
+        $ok = 1;
+    }
+    return $ok;
+}
+
+sub _light_off {
+    my ($self, $line) = @_;
+    my $ok = 0;
+    for my $sec ($self->_tagged($line->{tag})) {
+        $sec->{lightlevel} = _min_light($sec, $sec->{lightlevel});
+        $ok = 1;
+    }
+    return $ok;
+}
+
+sub _light_walk {
+    my ($self, $line) = @_;
+    my $ok = 0;
+    for my $sec ($self->_tagged($line->{tag})) {
+        next if $sec->{specialdata};
+        $self->_light_strobe($sec, SLOWDARK, 0);
+        $ok = 1;
+    }
+    return $ok;
+}
+
+sub _max_light {
+    my ($sector) = @_;
+    my $high = $sector->{lightlevel};
+    for my $other (surrounding_sectors($sector)) {
+        $high = $other->{lightlevel} if $other->{lightlevel} > $high;
+    }
+    return $high;
+}
+
+sub _door_wait {
+    my ($self, $sector, $dtype, $count) = @_;
+    return if $sector->{specialdata};
+    $sector->{special} = 0;
+    my $top = $dtype == VLD_CLOSE ? $sector->{ceilingheight} : lowest_ceiling($sector) - 4 * FRACUNIT;
+    my $door = {
+        kind => 'door', sector => $sector, type => $dtype, direction => 0,
+        topheight => $top, speed => VDOORSPEED, topwait => VDOORWAIT,
+        topcountdown => $count, dead => 0,
+    };
+    $sector->{specialdata} = $door;
+    push @{$self->{thinkers}}, $door;
+    return;
+}
+
 sub _highest_floor {
     my ($sector) = @_;
     my $h = -500 * FRACUNIT;
@@ -615,11 +1097,11 @@ sub _lowest_floor {
 }
 
 sub _start_floor {
-    my ($self, $sector, $dest, $dir, $speed, $pic) = @_;
+    my ($self, $sector, $dest, $dir, $speed, $pic, $crush) = @_;
     return 0 if !$sector || $sector->{specialdata};
     my $move = {
         kind => 'floor', sector => $sector, direction => $dir,
-        dest => $dest, speed => $speed, dead => 0, pic => $pic,
+        dest => $dest, speed => $speed, dead => 0, pic => $pic, crush => $crush || 0,
     };
     $sector->{specialdata} = $move;
     push @{$self->{thinkers}}, $move;
@@ -698,7 +1180,7 @@ sub _donut {
 }
 
 sub _plat {
-    my ($self, $line) = @_;
+    my ($self, $line, $fast) = @_;
     my $ok = 0;
     for my $sector ($self->_tagged($line->{tag})) {
         next if $sector->{specialdata};
@@ -707,7 +1189,7 @@ sub _plat {
         $low = $high - 8 * FRACUNIT if $low == $high;
         my $plat = {
             kind => 'plat', sector => $sector, status => PLAT_DOWN,
-            speed => FRACUNIT, low => $low, high => $high,
+            speed => FRACUNIT * ($fast ? 8 : 1), low => $low, high => $high,
             wait => 3 * TICRATE, count => 0, dead => 0,
         };
         $sector->{specialdata} = $plat;
@@ -722,7 +1204,7 @@ sub _tick_floor {
     my ($self, $move) = @_;
     my $res = move_plane(
         $self->{world}, $move->{sector}, $move->{speed}, $move->{dest},
-        0, $move->{direction}
+        0, $move->{direction}, $move->{crush}
     );
     return if $res != RESULT_PASTDEST;
     $move->{sector}{floorpic} = $move->{pic} if defined $move->{pic};
@@ -746,7 +1228,7 @@ sub _tick_plat {
         $up ? $plat->{high} : $plat->{low}, 0, $up ? 1 : -1
     );
     return if $res != RESULT_PASTDEST;
-    if (!$up) {
+    if (!$up || $plat->{perpetual}) {
         $plat->{status} = PLAT_WAIT;
         $plat->{count} = $plat->{wait};
         Doom::Sound::at($self->{world}, 'pstop');
@@ -815,6 +1297,37 @@ sub surrounding_sectors {
         push @out, $other;
     }
     return @out;
+}
+
+sub boss_floor {
+    my ($self, $tag) = @_;
+    my $ok = 0;
+    for my $sec (@{$self->{world}{sectors} || []}) {
+        next if ($sec->{tag} || 0) != $tag || $sec->{specialdata};
+        $ok = 1 if $self->_start_floor($sec, _lowest_floor($sec), -1, FLOORSPEED);
+    }
+    return $ok;
+}
+
+sub boss_raise {
+    my ($self, $tag) = @_;
+    my $ok = 0;
+    my $res = $self->{res};
+    for my $sec (@{$self->{world}{sectors} || []}) {
+        next if ($sec->{tag} || 0) != $tag || $sec->{specialdata};
+        my $minsize = 0x7FFFFFFF;
+        for my $ln (@{$sec->{lines} || []}) {
+            next if !(($ln->{flags} || 0) & 4);
+            for my $side (@{$ln->{sides} || []}) {
+                next if !$side || ($side->{bottomtexture} || 0) <= 0 || !$res;
+                my $h = $res->texture_height($side->{bottomtexture});
+                $minsize = $h if $h > 0 && $h < $minsize;
+            }
+        }
+        $minsize = 64 * FRACUNIT if $minsize == 0x7FFFFFFF;
+        $ok = 1 if $self->_start_floor($sec, ($sec->{floorheight} || 0) + $minsize, 1, FLOORSPEED);
+    }
+    return $ok;
 }
 
 sub lowest_ceiling {

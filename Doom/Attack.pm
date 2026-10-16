@@ -498,11 +498,19 @@ sub tick_mobjs {
     my @list = @{$world->{mobjs} || []};
     for my $mo (@list) {
         next if !$mo || $mo->{player} || !$mo->{alive};
+        if (($mo->{flags} || 0) & 0x1000000) {
+            Doom::Enemy::tick_skull($world, $mo);
+            next if !$mo->{alive};
+        }
         if (($mo->{flags} || 0) & MF_MISSILE) {
             Doom::Enemy::tick_missile($world, $mo);
             next if !$mo->{alive};
         }
-        next if !defined $mo->{istate} || ($mo->{tics} || 0) == -1;
+        if (($mo->{tics} || 0) == -1) {
+            Doom::Enemy::nightmare($world, $mo);
+            next;
+        }
+        next if !defined $mo->{istate};
         $mo->{tics}--;
         if ($mo->{tics} <= 0) {
             my $st = $Doom::Info::STATES[$mo->{istate}];
@@ -540,6 +548,8 @@ sub damage_mobj {
         $target->{damagecount} = 100 if $target->{damagecount} > 100;
         $target->{attacker} = $source if $source;
         Doom::Sound::at($world, 'plpain') if $target->{health} > 0;
+        $target->{message} = 'vida ' . $target->{health};
+        $target->{messaget} = 140;
         print "vida $target->{health}\n";
         return;
     }

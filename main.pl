@@ -44,10 +44,13 @@ use Doom::Defs qw(
 );
 use Doom::RData;
 use Doom::Render;
+use Doom::Profile;
 use Doom::Sound;
 use Doom::Specials;
 use Doom::Status;
 use Doom::Sprites qw(prepare_sprites spawn_map_things draw_sprites draw_gun);
+use Doom::Config;
+use Doom::Deh;
 use Doom::Tables qw(init_tables);
 use Doom::VVideo qw(fill draw_patch);
 use Doom::Video;
@@ -86,10 +89,20 @@ use constant MOVE_STEP => 0x19 * 2048;
 use constant MOVE_RUN => 0x32 * 2048;
 use constant TURN_STEP => 640 << 16;
 use constant TURN_RUN => 1280 << 16;
+use constant KEY_PAUSE => 1073741896;
+use constant KEY_COMMA => 44;
+use constant KEY_PERIOD => 46;
+use constant KEY_LALT => 1073742050;
+use constant KEY_RALT => 1073742054;
 
 my $want = '';
 my $fps_on = 0;
 my $vsync = 1;
+my $profile = 0;
+my $deh_file = '';
+my $demo_rec = '';
+my $demo_play = '';
+my $respawn_parm = 0;
 for (my $i = 0; $i < @ARGV; $i++) {
     my $arg = $ARGV[$i];
     if (lc($arg) eq '-fps') {
@@ -98,6 +111,21 @@ for (my $i = 0; $i < @ARGV; $i++) {
     elsif (lc($arg) eq '-novsync') {
         $vsync = 0;
     }
+    elsif (lc($arg) eq '-profile') {
+        $profile = 1;
+    }
+    elsif (lc($arg) eq '-respawn') {
+        $respawn_parm = 1;
+    }
+    elsif (lc($arg) eq '-deh') {
+        $deh_file = $ARGV[++$i] // '';
+    }
+    elsif (lc($arg) eq '-record') {
+        $demo_rec = $ARGV[++$i] // 'doomdemo.lmp';
+    }
+    elsif (lc($arg) eq '-play') {
+        $demo_play = $ARGV[++$i] // 'doomdemo.lmp';
+    }
     elsif (lc($arg) eq '-iwad') {
         $want = $ARGV[++$i] // '';
     }
@@ -105,6 +133,7 @@ for (my $i = 0; $i < @ARGV; $i++) {
         $want = $arg;
     }
 }
+$Doom::Profile::ON = 1 if $profile;
 
 my $prod = fixed_mul(65536, 196608);
 die "ponto fixo $prod\n" if $prod != 196608;
@@ -115,6 +144,9 @@ my $path = Doom::Wad::find_iwad($want);
 my $wad = Doom::Wad->new;
 $wad->add_file($path);
 print "IWAD $path  lumps " . $wad->num_lumps . "\n";
+Doom::Deh::load_lump($wad);
+Doom::Deh::load_file($deh_file) if $deh_file;
+my $cfg = Doom::Config::load($FindBin::Bin);
 
 my $pal = $wad->cache_lump_name('PLAYPAL');
 my $video = Doom::Video->new;
@@ -131,6 +163,61 @@ my $saver;
 my $cheat = Doom::Cheat->new;
 my $res;
 my ($world, $mo, $specials, $status, $view, $x, $y, $z, $ang);
+
+sub apply_view {
+    return if !$view || !$menu;
+    $view->set_view_size(($menu->{screen_size} // 7) + 3, $menu->{detail} ? 1 : 0);
+    save_cfg();
+    return;
+}
+
+sub save_cfg {
+    return if !$menu || !$cfg;
+    $cfg->{screen_size} = $menu->{screen_size} // 7;
+    $cfg->{detail} = $menu->{detail} ? 1 : 0;
+    $cfg->{scale} = $menu->{scale} || 2;
+    $cfg->{show_messages} = $menu->{messages} ? 1 : 0;
+    $cfg->{mouse_sensitivity} = $menu->{mouse_sens} // 5;
+    $cfg->{use_mouse} = $menu->{use_mouse} ? 1 : 0;
+    Doom::Config::save($FindBin::Bin, $cfg);
+    return;
+}
+
+sub take_menu {
+    my ($got) = @_;
+    return 'resume' if !$got;
+    if (!ref $got && $got eq 'quit') {
+        $sound->stop_music;
+        $video->shutdown;
+        exit 0;
+    }
+    if (!ref $got && $got eq 'endgame') {
+        return 'title';
+    }
+    if (ref $got eq 'HASH' && defined $got->{skill}) {
+        $episode = $got->{episode} || 1;
+        $mapn = 1;
+        $skill = $got->{skill};
+        start_map(0);
+        return 'resume';
+    }
+    if (ref $got eq 'HASH' && $got->{save}) {
+        $saver ||= Doom::Save->new($FindBin::Bin);
+        my $state = Doom::Save::capture($world, $specials, $episode, $mapn, $skill);
+        if ($saver->write_save($got->{save}, $got->{desc}, $state)) {
+            print "jogo salvo\n";
+        }
+        else {
+            print "nao salvou\n";
+        }
+        return 'resume';
+    }
+    if (ref $got eq 'HASH' && defined $got->{load}) {
+        load_slot($got->{load});
+        return 'resume';
+    }
+    return 'resume';
+}
 
 sub start_map {
     my ($carry) = @_;
@@ -240,6 +327,12 @@ sub start_map {
     }
     set_thing_position($world, $mo);
     $world->{skill} = $skill;
+    $world->{episode} = $episode;
+    $world->{mapn} = $mapn;
+    $world->{commercial} = $wad->check_num_for_name('MAP01') >= 0 ? 1 : 0;
+    $world->{leveltime} = 0;
+    Doom::Enemy::apply_fast($world);
+    $world->{respawn} = 1 if $respawn_parm || $skill >= 4;
     $mo->{ammo} = 100 if !%keep && $skill == 0;
     Doom::Cheat::sync_flags($mo);
     $sound->silence if $sound;
@@ -264,6 +357,7 @@ sub start_map {
     $status->apply_palette($video, $mo);
     $z = $mo->{z} + VIEWHEIGHT;
     $view ||= Doom::Render->new($res);
+    apply_view();
     print "coisas $things\n";
     print "balas $mo->{ammo}\n";
     return;
@@ -349,6 +443,7 @@ sub play_cheat_music {
 }
 
 sub paint_level {
+    $view->{look} = $mo->{look} || 0;
     $view->setup_frame($x, $y, $z, $ang);
     $view->{extralight} = $mo->{extralight} || 0;
     if (($mo->{pow_invul} || 0) > 128) {
@@ -360,7 +455,8 @@ sub paint_level {
     $view->render($world);
     draw_sprites($view, $world);
     draw_gun($view, $mo);
-    $status->draw(\$view->{fb}, $mo);
+    $status->{messages} = $menu ? $menu->{messages} : 1;
+    $status->draw(\$view->{fb}, $mo) if ($view->{screenblocks} || 10) < 11;
     $status->apply_palette($video, $mo);
     return;
 }
@@ -376,45 +472,51 @@ sub show_title {
     $video->upload($pic);
     $video->present;
     $sound->play_title;
-    print "Enter escolhe a dificuldade. F3 carrega\n";
-    while (1) {
-        my $key = $video->pump;
-        if ($key < 0 || $key == KEY_ESC) {
-            $sound->stop_music;
-            $video->shutdown;
-            exit 0;
-        }
-        return $key if $key == KEY_ENTER || $key == KEY_KP_ENTER || $key == KEY_F3;
-        $sound->update;
-        $video->present;
-        $video->delay(1) if !$vsync;
-    }
+    return;
 }
 
 sub choose_game {
     $menu ||= Doom::Menu->new($wad, $sound);
     $saver ||= Doom::Save->new($FindBin::Bin);
+    if (!$menu->{_cfg} && $cfg) {
+        $menu->{screen_size} = $cfg->{screen_size};
+        $menu->{detail} = $cfg->{detail} ? 1 : 0;
+        $menu->{scale} = $cfg->{scale} || 2;
+        $menu->{messages} = $cfg->{show_messages} ? 1 : 0;
+        $menu->{mouse_sens} = $cfg->{mouse_sensitivity};
+        $menu->{use_mouse} = $cfg->{use_mouse} ? 1 : 0;
+        $video->set_scale($menu->{scale});
+        $menu->{_cfg} = 1;
+    }
+    $menu->{on_view} = \&apply_view;
+    $menu->{on_scale} = sub {
+        return if !$video->set_scale($menu->{scale});
+        print(($menu->{scale} * 320) . 'x' . ($menu->{scale} * 200) . "\n");
+        save_cfg();
+    };
     while (1) {
-        my $title_key = show_title();
-        if ($title_key == KEY_F3) {
-            my $got = $menu->pick_slot($video, $titlepic, 'load', $saver, '');
-            if (!ref $got && $got && $got eq 'quit') {
-                $sound->stop_music;
-                $video->shutdown;
-                exit 0;
-            }
-            return $got if ref $got eq 'HASH';
-            next;
-        }
+        show_title();
+        $menu->{at_title} = 1;
+        $menu->{playing} = 0;
+        $menu->{saver} = $saver;
+        $video->grab_mouse(0);
         my $pick = $menu->choose($video, $titlepic);
-        if (!$pick) {
+        save_cfg();
+        if (!$pick || (!ref $pick && $pick eq 'back')) {
             next;
         }
-        if ($pick eq 'quit') {
+        if (!ref $pick && $pick eq 'quit') {
             $sound->stop_music;
             $video->shutdown;
             exit 0;
         }
+        if (!ref $pick && $pick eq 'endgame') {
+            next;
+        }
+        if (ref $pick eq 'HASH' && defined $pick->{load}) {
+            return $pick;
+        }
+        next if ref $pick ne 'HASH' || !defined $pick->{skill};
         $episode = $pick->{episode} || 1;
         $mapn = 1;
         $skill = $pick->{skill};
@@ -455,7 +557,31 @@ sub begin_finale {
     return;
 }
 
-my $boot = choose_game();
+my $demo_in;
+my $demo_out;
+my $paused = 0;
+my $use_latch = 0;
+my $boot;
+if ($demo_play) {
+    open $demo_in, '<', $demo_play or die "demo $demo_play\n";
+    binmode $demo_in;
+    my $hdr = '';
+    read $demo_in, $hdr, 3;
+    my ($sk, $ep, $mp) = unpack('C3', $hdr . "\0\0\0");
+    $skill = $sk if defined $sk;
+    $episode = $ep || 1;
+    $mapn = $mp || 1;
+    print "demo $demo_play\n";
+}
+else {
+    $boot = choose_game();
+}
+if ($demo_rec) {
+    open $demo_out, '>', $demo_rec or die "demo $demo_rec\n";
+    binmode $demo_out;
+    print $demo_out pack('C3', $skill, $episode, $mapn);
+    print "gravando $demo_rec\n";
+}
 init_tables();
 $res = Doom::RData->new($wad);
 $res->init;
@@ -507,8 +633,23 @@ while (1) {
     my $key = $video->pump;
     last if $key < 0;
     if ($key == KEY_ESC) {
-        $title_back = 1;
-        last;
+        $menu ||= Doom::Menu->new($wad, $sound);
+        $saver ||= Doom::Save->new($FindBin::Bin);
+        $menu->{at_title} = 0;
+        $menu->{playing} = 1;
+        $menu->{saver} = $saver;
+        $menu->{suggest} = $wad->check_num_for_name('MAP01') >= 0
+            ? sprintf('MAP%02d', $mapn) : "E${episode}M$mapn";
+        $video->grab_mouse(0);
+        my $got = $menu->choose($video, $view->{fb});
+        save_cfg();
+        if ($got && take_menu($got) eq 'title') {
+            $title_back = 1;
+            last;
+        }
+        $clock = $video->ticks;
+        $debt = 0;
+        next;
     }
     if ($wiping) {
         my $now = $video->ticks;
@@ -678,16 +819,36 @@ while (1) {
         $debt = 0;
         next;
     }
+    if ($key == KEY_PAUSE) {
+        $paused = $paused ? 0 : 1;
+        $mo->{message} = $paused ? 'pausa' : '';
+        $mo->{messaget} = $paused ? 9999 : 0;
+    }
+    if ($key == KEY_USE) {
+        $use_latch = 1;
+    }
     if ($key == KEY_TAB) {
         $automap->toggle;
     }
-    elsif ($automap->{active} && ($key == KEY_EQUALS || $key == 43 || $key == 1073741911)) {
-        $automap->zoom_in;
+    elsif ($key == KEY_EQUALS || $key == 43 || $key == 1073741911) {
+        if ($automap->{active}) {
+            $automap->zoom_in;
+        }
+        else {
+            $menu->bump_size(1) if $menu;
+            apply_view();
+        }
     }
-    elsif ($automap->{active} && ($key == KEY_MINUS || $key == 1073741910)) {
-        $automap->zoom_out;
+    elsif ($key == KEY_MINUS || $key == 1073741910) {
+        if ($automap->{active}) {
+            $automap->zoom_out;
+        }
+        else {
+            $menu->bump_size(0) if $menu;
+            apply_view();
+        }
     }
-    use_lines($world, $mo, $specials) if $key == KEY_USE;
+    use_lines($world, $mo, $specials) if $key == KEY_USE && !$demo_in;
     if ($specials->{exit} && !$specials->{said}) {
         $specials->{said} = 1;
         print "fim da fase\n";
@@ -742,49 +903,127 @@ while (1) {
     my $now = $video->ticks;
     my $span = ($now - $clock) & 0xFFFFFFFF;
     $clock = $now;
+    if ($paused) {
+        $debt = 0;
+    }
+    else {
     $debt += $span;
+    my ($mx, $my) = (0, 0);
+    if (!$demo_in && $menu && $menu->{use_mouse}) {
+        ($mx, $my) = $video->take_mouse;
+        my $sens = (($menu->{mouse_sens} // 5) + 5) / 10;
+        $mx = int($mx * $sens);
+        $my = int(-$my * $sens);
+    }
     my $steps = 0;
     while ($debt >= 28 && $steps < 4) {
         $debt -= 28;
         $steps++;
+        my $cmd = 0;
+        my $from_demo = 0;
+        if ($demo_in) {
+            my $raw = '';
+            if (read($demo_in, $raw, 1)) {
+                $cmd = ord($raw);
+                $from_demo = 1;
+            }
+            else {
+                close $demo_in;
+                $demo_in = undef;
+                print "fim da demo\n";
+            }
+        }
+        if (!$from_demo) {
+            $cmd |= 1 if $video->down(KEY_UP);
+            $cmd |= 2 if $video->down(KEY_DOWN);
+            $cmd |= 4 if $video->down(KEY_LEFT);
+            $cmd |= 8 if $video->down(KEY_RIGHT);
+            $cmd |= 16 if $video->down(KEY_LALT) || $video->down(KEY_RALT);
+            $cmd |= 32 if $video->down(KEY_LCTRL) || $video->down(KEY_RCTRL);
+            $cmd |= 64 if $use_latch;
+            $cmd |= 128 if $video->down(KEY_LSHIFT) || $video->down(KEY_RSHIFT);
+            $use_latch = 0;
+            print $demo_out pack('C', $cmd) if $demo_out;
+        }
         Doom::Cheat::tick($mo);
         Doom::Status::decay($mo);
         $specials->tick;
+        $mo->{messaget}-- if ($mo->{messaget} || 0) > 0;
+        $mo->{message} = '' if ($mo->{messaget} || 0) <= 0 && ($mo->{message} || '') ne 'pausa';
+        $world->{leveltime} = ($world->{leveltime} || 0) + 1;
+        $mo->{leveltime} = $world->{leveltime};
         my $frozen = ($mo->{reactiontime} || 0) > 0;
         $mo->{reactiontime}-- if $frozen;
-        my $run = $video->down(KEY_LSHIFT) || $video->down(KEY_RSHIFT);
+        my $run = $cmd & 128;
         my $turn = $run ? TURN_RUN : TURN_STEP;
         my $step = $run ? MOVE_RUN : MOVE_STEP;
-        if (!$frozen && $video->down(KEY_LEFT)) {
-            $ang = as_u32($ang + $turn);
+        my $strafe = $cmd & 16;
+        if (!$frozen && ($cmd & 4)) {
+            if ($strafe) {
+                thrust($mo, as_u32($ang + 0x40000000), $step);
+            }
+            else {
+                $ang = as_u32($ang + $turn);
+            }
         }
-        if (!$frozen && $video->down(KEY_RIGHT)) {
-            $ang = as_u32($ang - $turn);
+        if (!$frozen && ($cmd & 8)) {
+            if ($strafe) {
+                thrust($mo, as_u32($ang - 0x40000000), $step);
+            }
+            else {
+                $ang = as_u32($ang - $turn);
+            }
+        }
+        if (!$frozen && !$from_demo && !$strafe && $video->down(KEY_COMMA)) {
+            thrust($mo, as_u32($ang + 0x40000000), $step);
+        }
+        if (!$frozen && !$from_demo && !$strafe && $video->down(KEY_PERIOD)) {
+            thrust($mo, as_u32($ang - 0x40000000), $step);
+        }
+        if ($steps == 1 && !$from_demo && !$frozen) {
+            if ($strafe) {
+                thrust($mo, as_u32($ang - 0x40000000), $mx * 2048) if $mx;
+            }
+            else {
+                $ang = as_u32($ang - $mx * int(TURN_STEP / 8)) if $mx;
+            }
+            $mo->{look} = ($mo->{look} || 0) + int($my / 2);
+            $mo->{look} = 80 if ($mo->{look} || 0) > 80;
+            $mo->{look} = -80 if ($mo->{look} || 0) < -80;
         }
         $mo->{angle} = $ang;
         my $ground = ($mo->{z} || 0) <= ($mo->{floorz} || 0);
         my $moving = 0;
-        if (!$frozen && $ground && $video->down(KEY_UP)) {
+        if (!$frozen && $ground && ($cmd & 1)) {
             thrust($mo, $ang, $step);
             $moving = 1;
         }
-        if (!$frozen && $ground && $video->down(KEY_DOWN)) {
+        if (!$frozen && $ground && ($cmd & 2)) {
             thrust($mo, $ang, -$step);
             $moving = 1;
         }
         xy_move($world, $mo, $moving);
         $ang = $mo->{angle};
+        my $spd = fixed_mul($mo->{momx} || 0, $mo->{momx} || 0)
+            + fixed_mul($mo->{momy} || 0, $mo->{momy} || 0);
+        $spd = int($spd / 4);
+        $spd = 16 * 65536 if $spd > 16 * 65536;
+        $mo->{bob} = $spd;
         z_move($world, $mo);
         $specials->hurt_sector($mo);
         Doom::Attack::tick_mobjs($world);
-        my $firing = $video->down(KEY_LCTRL) || $video->down(KEY_RCTRL);
+        use_lines($world, $mo, $specials) if $from_demo && ($cmd & 64);
+        my $firing = ($cmd & 32) || (!$from_demo && $video->mouse_fire);
         Doom::Attack::weapon_think($world, $mo, $firing, $res->{skyflatnum});
         $status->tick($mo);
         $x = $mo->{x};
         $y = $mo->{y};
         $z = $mo->{z} + VIEWHEIGHT;
     }
+    }
     $debt = 28 if $debt > 28;
+    $video->grab_mouse(!$paused && $menu && $menu->{use_mouse} && !$wiping);
+    $status->{messages} = $menu ? $menu->{messages} : 1 if $status;
     if ($automap->{active}) {
         fill(\$view->{fb}, 0);
         $automap->draw(\$view->{fb}, $mo, $world);

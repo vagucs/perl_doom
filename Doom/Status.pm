@@ -164,6 +164,9 @@ sub draw {
         _number($fb, $at[$i][0], $at[$i][1], $have[$i], $self->{short});
         _number($fb, $mx[$i][0], $mx[$i][1], $max[$i], $self->{short});
     }
+    if (($self->{messages} // 1) && ($mo->{messaget} || 0) > 0 && $mo->{message}) {
+        $self->draw_text($fb, 0, 0, $mo->{message});
+    }
     return;
 }
 

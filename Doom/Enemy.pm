@@ -41,6 +41,19 @@ use constant MI_MISSILESTATE => 11;
 use constant MI_DEATHSTATE => 12;
 use constant MI_SPEED => 15;
 use constant MI_DAMAGE => 19;
+use constant MF_SKULLFLY => 0x1000000;
+use constant MF_CORPSE => 0x100000;
+use constant MF_COUNTKILL => 0x400000;
+use constant SKULLSPEED => 20 * FRACUNIT;
+use constant TRACEANGLE => 0x0c000000;
+use constant FATSPREAD => 0x08000000;
+use constant MAXSKULLS => 20;
+
+my @brain;
+my $brain_on = 0;
+my $fast_on;
+my @sarg_tics;
+my %shot_speed;
 
 my @XSPEED = (65536, 47000, 0, -47000, -65536, -47000, 0, 47000);
 my @YSPEED = (0, 47000, 65536, 47000, 0, -47000, -65536, -47000);
@@ -74,6 +87,104 @@ sub call_action {
     elsif ($act eq 'BFGSpray') {
         _bfg_spray($world, $mo);
     }
+    elsif ($act eq 'CPosAttack') {
+        Doom::Sound::at($world, 'shotgn');
+        _hitscan($world, $mo, 1, 5, 3);
+    }
+    elsif ($act eq 'CPosRefire' || $act eq 'SpidRefire') {
+        _refire($world, $mo, $act eq 'CPosRefire' ? 40 : 10);
+    }
+    elsif ($act eq 'HeadAttack') {
+        _melee_or_ball($world, $mo, 32, 10);
+    }
+    elsif ($act eq 'BruisAttack') {
+        _melee_or_ball($world, $mo, 16, 10);
+    }
+    elsif ($act eq 'SkullAttack') {
+        _skull_attack($world, $mo);
+    }
+    elsif ($act eq 'CyberAttack') {
+        _ball($world, $mo, 33);
+    }
+    elsif ($act eq 'BspiAttack') {
+        _ball($world, $mo, 36);
+    }
+    elsif ($act eq 'PainAttack') {
+        _pain_shoot($world, $mo, $mo->{angle} || 0);
+    }
+    elsif ($act eq 'PainDie') {
+        $mo->{flags} &= ~0x2;
+        _pain_shoot($world, $mo, as_u32(($mo->{angle} || 0) + $_)) for (ANG90, ANG90 * 2, ANG270);
+    }
+    elsif ($act eq 'FatRaise') {
+        _face($mo, $mo->{target}) if $mo->{target};
+        Doom::Sound::at($world, 'manatk');
+    }
+    elsif ($act =~ /\AFatAttack([123])\z/) {
+        _fat($world, $mo, $1);
+    }
+    elsif ($act eq 'SkelWhoosh') {
+        _face($mo, $mo->{target}) if $mo->{target};
+        Doom::Sound::at($world, 'skeswg');
+    }
+    elsif ($act eq 'SkelFist') {
+        Doom::Sound::at($world, 'skepch') if _melee($world, $mo, 6);
+    }
+    elsif ($act eq 'SkelMissile') {
+        my $miss = _ball($world, $mo, 6);
+        if ($miss) {
+            $miss->{tracer} = $mo->{target};
+            $miss->{z} += 16 * FRACUNIT;
+        }
+    }
+    elsif ($act eq 'Tracer') {
+        _tracer_home($mo) if !(($world->{leveltime} || 0) & 3);
+    }
+    elsif ($act eq 'VileStart' || $act eq 'VileAttack') {
+        _vile_attack($world, $mo);
+    }
+    elsif ($act eq 'VileTarget') {
+        _vile_target($world, $mo);
+    }
+    elsif ($act eq 'VileChase') {
+        _chase($world, $mo) if !_vile_chase($world, $mo);
+    }
+    elsif ($act eq 'StartFire' || $act eq 'Fire' || $act eq 'FireCrackle') {
+        Doom::Sound::at($world, $act eq 'FireCrackle' ? 'flame' : 'flamst') if $act ne 'Fire';
+        _fire_follow($mo);
+    }
+    elsif ($act eq 'Metal' || $act eq 'BabyMetal' || $act eq 'Hoof') {
+        Doom::Sound::at($world, $act eq 'Hoof' ? 'hoof' : $act eq 'BabyMetal' ? 'bspwlk' : 'metal');
+        _chase($world, $mo);
+    }
+    elsif ($act eq 'BossDeath') {
+        _boss_death($world, $mo);
+    }
+    elsif ($act eq 'KeenDie') {
+        $mo->{flags} &= ~0x2;
+        _boss_death($world, $mo, 1);
+    }
+    elsif ($act eq 'BrainAwake') {
+        @brain = grep { ($_->{type} || 0) == 27 } @{$world->{mobjs} || []};
+        $brain_on = 0;
+        Doom::Sound::at($world, 'bossit');
+    }
+    elsif ($act eq 'BrainSpit') {
+        _brain_spit($world, $mo);
+    }
+    elsif ($act eq 'BrainDie') {
+        $world->{specials}{exit} = 1 if $world->{specials};
+    }
+    elsif ($act eq 'BrainPain') {
+        Doom::Sound::at($world, 'bospn');
+    }
+    elsif ($act eq 'BrainScream') {
+        Doom::Sound::at($world, 'bosdth');
+    }
+    elsif ($act eq 'SpawnSound' || $act eq 'SpawnFly') {
+        Doom::Sound::at($world, 'boscub') if $act eq 'SpawnSound';
+        _spawn_fly($world, $mo);
+    }
     return;
 }
 
@@ -100,6 +211,7 @@ sub _bfg_spray {
 sub tick_missile {
     my ($world, $mo) = @_;
     return if !$mo || !(($mo->{flags} || 0) & MF_MISSILE) || !$mo->{alive};
+    _tracer_home($mo) if ($mo->{type} || 0) == 6 && !(($world->{leveltime} || 0) & 3);
     $mo->{z} += $mo->{momz} || 0;
     $mo->{_hitthing} = undef;
     my $ok = try_move($world, $mo, $mo->{x} + ($mo->{momx} || 0), $mo->{y} + ($mo->{momy} || 0));
@@ -566,6 +678,352 @@ sub _boom {
     my $death = $info ? ($info->[MI_DEATHSTATE] || 0) : 0;
     Doom::Attack::set_mobj_state($world, $mo, $death);
     return;
+}
+
+sub apply_fast {
+    my ($world) = @_;
+    my $want = ($world->{skill} || 0) >= 4 ? 1 : 0;
+    $world->{respawn} = $want;
+    if (!@sarg_tics) {
+        @sarg_tics = map { $Doom::Info::STATES[$_][2] } 477 .. 489;
+        $shot_speed{$_} = $Doom::Info::MOBJINFO[$_][15] for (16, 31, 32);
+    }
+    return if defined $fast_on && $fast_on == $want;
+    $fast_on = $want;
+    for my $i (0 .. $#sarg_tics) {
+        my $t = $want ? int($sarg_tics[$i] / 2) : $sarg_tics[$i];
+        $t = 1 if $t < 1;
+        $Doom::Info::STATES[477 + $i][2] = $t;
+    }
+    for my $mt (keys %shot_speed) {
+        $Doom::Info::MOBJINFO[$mt][15] = $want ? $shot_speed{$mt} * 2 : $shot_speed{$mt};
+    }
+    return;
+}
+
+sub nightmare {
+    my ($world, $mo) = @_;
+    return if !$world->{respawn} || !$mo || $mo->{player};
+    return if !(($mo->{flags} || 0) & MF_COUNTKILL);
+    $mo->{movecount} = ($mo->{movecount} || 0) + 1;
+    return if $mo->{movecount} < 12 * 35;
+    return if ($world->{leveltime} || 0) & 31;
+    return if Doom::Attack::p_random() > 4;
+    my $x = defined $mo->{spawnx} ? $mo->{spawnx} : $mo->{x};
+    my $y = defined $mo->{spawny} ? $mo->{spawny} : $mo->{y};
+    my $chk = Doom::Collision::check_position($world, $mo, $x, $y);
+    return if $chk->{blocked};
+    Doom::Attack::_spawn_fx($world, $mo->{x}, $mo->{y}, $mo->{floorz} || $mo->{z}, 39);
+    Doom::Sound::at($world, 'telept');
+    my $sub = $world->point_in_subsector($x, $y);
+    my $z = $sub && $sub->{sector} ? $sub->{sector}{floorheight} : ($mo->{z} || 0);
+    Doom::Attack::_spawn_fx($world, $x, $y, $z, 39);
+    my $born = _spawn_at($world, $x, $y, $z, $mo->{type});
+    return if !$born;
+    $born->{angle} = $mo->{spawnang} || 0;
+    $born->{spawnx} = $x;
+    $born->{spawny} = $y;
+    $born->{spawnang} = $born->{angle};
+    $born->{flags} |= 32 if ($mo->{spawnopt} || 0) & 8;
+    $born->{reactiontime} = 18;
+    Doom::Attack::_remove($world, $mo);
+    return;
+}
+
+sub tick_skull {
+    my ($world, $mo) = @_;
+    return if !$mo || !(($mo->{flags} || 0) & MF_SKULLFLY);
+    if (!($mo->{momx} || 0) && !($mo->{momy} || 0)) {
+        _skull_stop($world, $mo);
+        return;
+    }
+    $mo->{z} += $mo->{momz} || 0;
+    if (!try_move($world, $mo, $mo->{x} + $mo->{momx}, $mo->{y} + $mo->{momy})) {
+        my $hit = $mo->{_hitthing};
+        if ($hit && (($hit->{flags} || 0) & MF_SHOOTABLE) && $hit != $mo) {
+            my $info = _info($mo) || [];
+            my $dmg = ($info->[MI_DAMAGE] || 3) * ((Doom::Attack::p_random() % 8) + 1);
+            Doom::Attack::damage_mobj($world, $hit, $mo, $dmg);
+        }
+        _skull_stop($world, $mo);
+        return;
+    }
+    if ($mo->{z} <= ($mo->{floorz} || 0) || $mo->{z} + ($mo->{height} || 0) > ($mo->{ceilingz} || 0)) {
+        _skull_stop($world, $mo);
+    }
+    return;
+}
+
+sub _skull_stop {
+    my ($world, $mo) = @_;
+    $mo->{flags} &= ~MF_SKULLFLY;
+    $mo->{momx} = $mo->{momy} = $mo->{momz} = 0;
+    my $info = _info($mo);
+    Doom::Attack::set_mobj_state($world, $mo, $info->[1] || 0) if $info;
+    return;
+}
+
+sub _skull_attack {
+    my ($world, $mo) = @_;
+    my $dest = $mo->{target};
+    return if !$dest;
+    $mo->{flags} |= MF_SKULLFLY;
+    Doom::Sound::at($world, 'sklatk');
+    _face($mo, $dest);
+    $mo->{momx} = fixed_mul(SKULLSPEED, fine_cos($mo->{angle}));
+    $mo->{momy} = fixed_mul(SKULLSPEED, fine_sin($mo->{angle}));
+    my $dist = approx_distance($dest->{x} - $mo->{x}, $dest->{y} - $mo->{y});
+    my $steps = int($dist / SKULLSPEED);
+    $steps = 1 if $steps < 1;
+    $mo->{momz} = int((($dest->{z} || 0) + int(($dest->{height} || 0) / 2) - $mo->{z}) / $steps);
+    return;
+}
+
+sub _ball {
+    my ($world, $mo, $type) = @_;
+    return if !$mo->{target};
+    _face($mo, $mo->{target});
+    return _spawn_ball($world, $mo, $mo->{target}, $type);
+}
+
+sub _refire {
+    my ($world, $mo, $chance) = @_;
+    _face($mo, $mo->{target}) if $mo->{target};
+    return if Doom::Attack::p_random() < $chance;
+    my $t = $mo->{target};
+    if (!$t || ($t->{health} || 0) <= 0 || !_sight($world, $mo, $t)) {
+        my $info = _info($mo);
+        Doom::Attack::set_mobj_state($world, $mo, $info->[3] || 0) if $info;
+    }
+    return;
+}
+
+sub _pain_shoot {
+    my ($world, $actor, $ang) = @_;
+    my $n = 0;
+    for my $other (@{$world->{mobjs} || []}) {
+        $n++ if $other && ($other->{type} || 0) == 18 && ($other->{health} || 0) > 0;
+    }
+    return if $n >= MAXSKULLS;
+    my $pre = 4 * FRACUNIT + int(3 * ($actor->{radius} || 0) / 2);
+    my $x = $actor->{x} + fixed_mul($pre, fine_cos($ang));
+    my $y = $actor->{y} + fixed_mul($pre, fine_sin($ang));
+    my $skull = _spawn_at($world, $x, $y, $actor->{z}, 18);
+    return if !$skull;
+    $skull->{angle} = $ang;
+    my $chk = Doom::Collision::check_position($world, $skull, $skull->{x}, $skull->{y});
+    if ($chk->{blocked}) {
+        Doom::Attack::damage_mobj($world, $skull, $actor, 10000);
+        return;
+    }
+    $skull->{target} = $actor->{target};
+    _skull_attack($world, $skull);
+    return;
+}
+
+sub _fat {
+    my ($world, $mo, $which) = @_;
+    return if !$mo->{target};
+    _face($mo, $mo->{target});
+    my $spread = FATSPREAD;
+    $spread = -$spread if $which == 2;
+    $mo->{angle} = as_u32($mo->{angle} + $spread) if $which != 3;
+    my $a = _spawn_ball($world, $mo, $mo->{target}, 9);
+    my $b = _spawn_ball($world, $mo, $mo->{target}, 9);
+    return if !$b;
+    my $turn = $which == 1 ? FATSPREAD : $which == 2 ? -(FATSPREAD * 2) : int(FATSPREAD / 2);
+    $b->{angle} = as_u32(($which == 3 ? $mo->{angle} : $b->{angle}) + $turn);
+    my $info = $Doom::Info::MOBJINFO[9];
+    my $speed = $info ? $info->[15] : 0;
+    $b->{momx} = fixed_mul($speed, fine_cos($b->{angle}));
+    $b->{momy} = fixed_mul($speed, fine_sin($b->{angle}));
+    if ($which == 3 && $a) {
+        $a->{angle} = as_u32($mo->{angle} - int(FATSPREAD / 2));
+        $a->{momx} = fixed_mul($speed, fine_cos($a->{angle}));
+        $a->{momy} = fixed_mul($speed, fine_sin($a->{angle}));
+    }
+    return;
+}
+
+sub _tracer_home {
+    my ($mo) = @_;
+    my $dest = $mo->{tracer};
+    return if !$dest || ($dest->{health} || 0) <= 0;
+    my $exact = Doom::Collision::angle_to($mo->{x}, $mo->{y}, $dest->{x}, $dest->{y});
+    my $diff = as_u32($exact - ($mo->{angle} || 0));
+    if ($diff > 0x80000000) {
+        $mo->{angle} = as_u32($mo->{angle} - TRACEANGLE);
+        $mo->{angle} = $exact if as_u32($exact - $mo->{angle}) < 0x80000000;
+    }
+    else {
+        $mo->{angle} = as_u32($mo->{angle} + TRACEANGLE);
+        $mo->{angle} = $exact if as_u32($exact - $mo->{angle}) > 0x80000000;
+    }
+    my $info = _info($mo) || [];
+    my $speed = $info->[15] || 0;
+    $mo->{momx} = fixed_mul($speed, fine_cos($mo->{angle}));
+    $mo->{momy} = fixed_mul($speed, fine_sin($mo->{angle}));
+    my $dist = approx_distance($dest->{x} - $mo->{x}, $dest->{y} - $mo->{y});
+    my $steps = $speed ? int($dist / $speed) : 1;
+    $steps = 1 if $steps < 1;
+    $mo->{momz} = int((($dest->{z} || 0) + 40 * FRACUNIT - $mo->{z}) / $steps);
+    return;
+}
+
+sub _vile_chase {
+    my ($world, $mo) = @_;
+    for my $other (@{$world->{mobjs} || []}) {
+        next if !$other || $other == $mo;
+        next if !(($other->{flags} || 0) & MF_CORPSE);
+        next if ($other->{health} || 0) > 0;
+        my $info = _info($other);
+        next if !$info || !($info->[22] || 0);
+        my $max = ($mo->{radius} || 0) + ($other->{radius} || 0);
+        next if abs($other->{x} - $mo->{x}) > $max || abs($other->{y} - $mo->{y}) > $max;
+        Doom::Attack::set_mobj_state($world, $mo, 266);
+        Doom::Sound::at($world, 'slop');
+        Doom::Attack::set_mobj_state($world, $other, $info->[22]);
+        $other->{flags} = $info->[21];
+        $other->{health} = $info->[2];
+        $other->{height} = $info->[17];
+        $other->{radius} = $info->[16];
+        $other->{target} = undef;
+        $other->{alive} = 1;
+        $other->{z} = $other->{floorz} || $other->{z};
+        return 1;
+    }
+    return 0;
+}
+
+sub _vile_attack {
+    my ($world, $mo) = @_;
+    my $dest = $mo->{target};
+    return if !$dest || !_sight($world, $mo, $dest);
+    Doom::Sound::at($world, 'vilatk');
+    Doom::Attack::damage_mobj($world, $dest, $mo, 20);
+    for my $th (@{$world->{mobjs} || []}) {
+        next if !$th || $th == $mo || !$th->{alive};
+        next if !(($th->{flags} || 0) & MF_SHOOTABLE);
+        my $dist = approx_distance($th->{x} - $dest->{x}, $th->{y} - $dest->{y});
+        my $dmg = 70 - int($dist / FRACUNIT);
+        Doom::Attack::damage_mobj($world, $th, $mo, $dmg) if $dmg > 0;
+    }
+    return;
+}
+
+sub _vile_target {
+    my ($world, $mo) = @_;
+    return if !$mo->{target};
+    _face($mo, $mo->{target});
+    my $fog = _spawn_at($world, $mo->{target}{x}, $mo->{target}{y}, $mo->{target}{z}, 4);
+    return if !$fog;
+    $mo->{tracer} = $fog;
+    $fog->{target} = $mo;
+    $fog->{tracer} = $mo->{target};
+    return;
+}
+
+sub _fire_follow {
+    my ($mo) = @_;
+    my $dest = $mo->{tracer};
+    return if !$dest || !$mo->{target};
+    $mo->{x} = $dest->{x};
+    $mo->{y} = $dest->{y};
+    $mo->{z} = $dest->{z};
+    return;
+}
+
+sub _boss_death {
+    my ($world, $mo, $keen) = @_;
+    my $type = $mo->{type} || 0;
+    for my $other (@{$world->{mobjs} || []}) {
+        next if !$other || $other == $mo;
+        return if ($other->{type} || 0) == $type && ($other->{health} || 0) > 0;
+    }
+    my $spec = $world->{specials};
+    return if !$spec;
+    if ($keen) {
+        $spec->_door_tag({ tag => 666 }, 6);
+        return;
+    }
+    my $map = $world->{mapn} || 1;
+    my $ep = $world->{episode} || 1;
+    if ($world->{commercial}) {
+        return if $map != 7;
+        $spec->boss_floor(666) if $type == 8;
+        $spec->boss_raise(667) if $type == 20;
+        return;
+    }
+    if ($ep == 1 && $map == 8 && $type == 15) {
+        $spec->boss_floor(666);
+    }
+    elsif (($ep == 2 && $map == 8 && $type == 21) || ($ep == 3 && $map == 8 && $type == 19)) {
+        $spec->{exit} = 1;
+    }
+    elsif (($ep == 4 && $map == 6 && $type == 21) || ($ep == 4 && $map == 8 && $type == 15)) {
+        $spec->boss_floor(666);
+    }
+    return;
+}
+
+sub _brain_spit {
+    my ($world, $actor) = @_;
+    if (($world->{skill} || 0) <= 1) {
+        $actor->{_easy} = !$actor->{_easy};
+        return if $actor->{_easy};
+    }
+    @brain = grep { ($_->{type} || 0) == 27 } @{$world->{mobjs} || []} if !@brain;
+    return if !@brain;
+    my $dest = $brain[$brain_on % @brain];
+    $brain_on++;
+    Doom::Sound::at($world, 'bospit');
+    my $miss = _spawn_ball($world, $actor, $dest, 28);
+    return if !$miss;
+    $miss->{target} = $dest;
+    my $st = $miss->{tics} || 1;
+    $miss->{reactiontime} = int((($dest->{y} - $actor->{y}) / $miss->{momy}) / $st) if $miss->{momy};
+    return;
+}
+
+sub _spawn_fly {
+    my ($world, $cube) = @_;
+    $cube->{reactiontime} = ($cube->{reactiontime} || 0) - 1;
+    return if ($cube->{reactiontime} || 0) != 0;
+    my $dest = $cube->{target} || $cube;
+    my $r = Doom::Attack::p_random();
+    my $typ = $r < 50 ? 11 : $r < 90 ? 12 : $r < 120 ? 13 : $r < 130 ? 22
+        : $r < 160 ? 14 : $r < 162 ? 3 : $r < 172 ? 5 : $r < 192 ? 20
+        : $r < 222 ? 8 : $r < 246 ? 17 : 15;
+    Doom::Sound::at($world, 'telept');
+    my $born = _spawn_at($world, $dest->{x}, $dest->{y}, $dest->{z}, $typ);
+    $born->{angle} = $dest->{angle} || 0 if $born;
+    Doom::Attack::_remove($world, $cube);
+    return;
+}
+
+sub _spawn_at {
+    my ($world, $x, $y, $z, $type) = @_;
+    my $info = $Doom::Info::MOBJINFO[$type];
+    return if !$info;
+    my $stn = $info->[1];
+    my $st = $Doom::Info::STATES[$stn];
+    return if !$st;
+    my $sub = $world->point_in_subsector($x, $y);
+    my $mo = {
+        x => $x, y => $y, z => $z, angle => 0,
+        radius => $info->[16], height => $info->[17],
+        floorz => $sub && $sub->{sector} ? $sub->{sector}{floorheight} : $z,
+        ceilingz => $sub && $sub->{sector} ? $sub->{sector}{ceilingheight} : $z,
+        flags => $info->[21], health => $info->[2], type => $type,
+        doomednum => $info->[0], player => undef, alive => 1,
+        istate => $stn, tics => $st->[2],
+        sprite => sprite_name($st->[0]), frame => $st->[1],
+        momx => 0, momy => 0, momz => 0,
+        movedir => 8, movecount => 0, reactiontime => $info->[5] || 0,
+    };
+    push @{$world->{mobjs}}, $mo;
+    Doom::Collision::set_thing_position($world, $mo);
+    return $mo;
 }
 
 1;

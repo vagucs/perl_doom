@@ -19,9 +19,10 @@ use warnings;
 use Doom::Collision qw(set_thing_position);
 use Doom::Compat qw(as_i32 as_u32 fixed_div fixed_mul shar);
 use Doom::Defs qw(
-    ANG45 FRACBITS FRACUNIT
+    ANG45 FINEANGLES FINEMASK FRACBITS FRACUNIT
     SCREENWIDTH SIL_BOTTOM SIL_TOP
 );
+use Doom::Tables qw(fine_sin);
 use Doom::Info qw(
     sprite_name mobj_type_for_doomednum
     MI_DOOMEDNUM MI_FLAGS MI_HEIGHT MI_RADIUS MI_SPAWNHEALTH MI_SPAWNSTATE
@@ -193,6 +194,7 @@ sub spawn_map_things {
             type => $typ, doomednum => $info->[MI_DOOMEDNUM],
             player => undef, sprite => '', frame => 0,
             istate => 0, tics => -1, alive => 1,
+            spawnx => $x, spawny => $y, spawnang => 0, spawnopt => $mt->{options} || 0,
             reactiontime => $info->[5] || 0, movedir => 8, movecount => 0,
             threshold => 0, lastlook => 0, momx => 0, momy => 0, momz => 0,
         };
@@ -208,6 +210,7 @@ sub spawn_map_things {
         $mo->{sprite} = sprite_name($st->[0]);
         $mo->{frame} = $st->[1];
         $mo->{angle} = as_u32(int($mt->{angle} / 45) * ANG45);
+        $mo->{spawnang} = $mo->{angle};
         $mo->{flags} |= MF_AMBUSH if $mt->{options} & 8;
         push @{$world->{mobjs}}, $mo;
         set_thing_position($world, $mo);
@@ -414,9 +417,15 @@ sub _draw_sprite {
                             if ($idx >= 0 && $idx < $length) {
                                 my $pix = ord(substr($patch, $source + $idx, 1));
                                 my $val = $pix < length($cm) ? ord(substr($cm, $pix, 1)) : $pix;
-                                my $off = $renderer->{ylookup}[$y] + $renderer->{columnofs}[$x];
+                                my $colx = $renderer->{detailshift} ? ($x << 1) : $x;
+                                my $off = $renderer->{ylookup}[$y] + $renderer->{columnofs}[$colx];
                                 if ($off >= 0 && $off < $limit) {
-                                    substr($$fb, $off, 1) = chr($val);
+                                    if ($renderer->{detailshift} && $off + 1 < $limit) {
+                                        substr($$fb, $off, 2) = chr($val) x 2;
+                                    }
+                                    else {
+                                        substr($$fb, $off, 1) = chr($val);
+                                    }
                                 }
                             }
                         }
@@ -488,7 +497,15 @@ sub draw_gun {
     my $frame = ($mo && defined $mo->{gunframe}) ? $mo->{gunframe} : 0;
     my $patch = _gun_patch($renderer, $name, $frame);
     $patch = $gun_patch if !$patch;
-    draw_psprite($renderer, $patch, FRACUNIT, WEAPONTOP);
+    my ($sx, $sy) = (FRACUNIT, WEAPONTOP);
+    my $bob = $mo && $mo->{bob} ? $mo->{bob} : 0;
+    if ($bob && ($mo->{gunstate} || '') eq 'ready') {
+        my $angle = (128 * ($mo->{leveltime} || 0)) & FINEMASK;
+        $sx = FRACUNIT + fixed_mul($bob, fine_sin(($angle + int(FINEANGLES / 4)) & FINEMASK));
+        $angle &= int(FINEANGLES / 2) - 1;
+        $sy = WEAPONTOP + fixed_mul($bob, fine_sin($angle));
+    }
+    draw_psprite($renderer, $patch, $sx, $sy);
     if ($mo && ($mo->{flash_tics} || 0) > 0 && $mo->{gunflash}) {
         my $flash = _gun_patch($renderer, $mo->{gunflash}, $mo->{gunflashframe} || 0);
         draw_psprite($renderer, $flash, FRACUNIT, WEAPONTOP) if $flash;
