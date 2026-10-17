@@ -158,7 +158,9 @@ sub _init_slopes {
     my ($self) = @_;
     $self->{yslope} = [];
     for my $i (0 .. $self->{viewheight} - 1) {
-        my $dy = abs((($i - $self->{centery}) << FRACBITS) + int(FRACUNIT / 2));
+        # O << do Perl, num negativo, vira inteiro sem sinal. O teto fica
+        # acima do centro, entao a conta e uma multiplicacao.
+        my $dy = abs((($i - $self->{centery}) * FRACUNIT) + int(FRACUNIT / 2));
         $dy = 1 if $dy < 1;
         $self->{yslope}[$i] = fixed_div((int(($self->{viewwidth} << $self->{detailshift}) / 2)) * FRACUNIT, $dy);
     }
